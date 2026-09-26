@@ -1,4 +1,4 @@
-import { execFile } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { realpath } from "node:fs/promises";
 import path from "node:path";
 import { config } from "../config.js";
@@ -25,6 +25,41 @@ export function run(file: string, args: string[], cwd: string): Promise<ExecResu
         resolve({ ok: !err, stdout: String(stdout), stderr: String(stderr || (err && !stdout ? err.message : "")), code });
       },
     );
+  });
+}
+
+/**
+ * Run a command line through zsh. Only for user-approved commands.
+ * The command gets its own process group so a timeout kills everything it started,
+ * not just the shell (otherwise `npm start` would leave node running).
+ */
+export function runShell(command: string, cwd: string, timeoutMs: number): Promise<ExecResult & { timedOut: boolean }> {
+  return new Promise((resolve) => {
+    const child = spawn("/bin/zsh", ["-c", command], { cwd, detached: true, stdio: ["ignore", "pipe", "pipe"] });
+    const cap = 1024 * 1024;
+    let stdout = "";
+    let stderr = "";
+    let timedOut = false;
+    child.stdout.on("data", (d) => stdout.length < cap && (stdout += d));
+    child.stderr.on("data", (d) => stderr.length < cap && (stderr += d));
+
+    const timer = setTimeout(() => {
+      timedOut = true;
+      try {
+        process.kill(-child.pid!, "SIGKILL");
+      } catch {
+        // already exited
+      }
+    }, timeoutMs);
+
+    child.on("close", (code) => {
+      clearTimeout(timer);
+      resolve({ ok: code === 0 && !timedOut, stdout, stderr, code, timedOut });
+    });
+    child.on("error", (err) => {
+      clearTimeout(timer);
+      resolve({ ok: false, stdout, stderr: err.message, code: null, timedOut });
+    });
   });
 }
 

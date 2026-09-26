@@ -39,13 +39,14 @@ elena ~/Projects/Transport-For-Ghana
 | `search` | Regex search with `rg` (falls back to `grep`) |
 | `git_status` / `git_diff` / `git_log` | Read-only git |
 | `port_owner` | What's listening on a TCP port |
+| `run_command` | Any zsh command. **Always asks you first**, shows the exact command. 30s default timeout (max 300s). |
 
 ## Safety model
 
-- No shell. Tools call binaries with `execFile` and argv arrays, so `;`, `&&` and `$()` do nothing.
+- No shell, except `run_command`, which never runs without your approval. Other tools call binaries with `execFile` and argv arrays, so `;`, `&&` and `$()` do nothing.
 - File access is limited to the project root; symlinks are resolved before checking.
 - Reading `.env`, keys and similar files asks you first.
-- Every command has a timeout and output cap; long output is trimmed before it reaches the model.
+- Every command has a timeout and output cap. `run_command` kills the whole process group on timeout, so nothing is left running; long output is trimmed before it reaches the model.
 - Tools marked `requiresConfirmation` are gated in the agent loop (in code, not in the prompt).
 
 ## Layout
@@ -62,7 +63,6 @@ src/
 
 ## Next
 
-- `run_command` tool with `requiresConfirmation: true`
 - Process manager (start/stop services, tail logs)
 - SQLite memory (`node:sqlite`)
 - Project scan / summary on startup

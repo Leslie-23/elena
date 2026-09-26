@@ -47,7 +47,7 @@ export class Agent {
     const tool = toolsByName.get(name);
     if (!tool) return `Unknown tool: ${name}. Available: ${[...toolsByName.keys()].join(", ")}`;
     if (tool.requiresConfirmation) {
-      const ok = await this.ctx.confirm(`Run ${name} ${JSON.stringify(args)}?`);
+      const ok = await this.ctx.confirm(tool.confirmMessage?.(args) ?? `Run ${name} ${JSON.stringify(args)}?`);
       if (!ok) return "User declined.";
     }
     try {

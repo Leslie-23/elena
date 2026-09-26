@@ -11,6 +11,8 @@ export interface Tool {
   schema: ToolSchema;
   /** If true, the agent asks the user before running it. Enforced in code, not in the prompt. */
   requiresConfirmation?: boolean;
+  /** What to show the user when asking for confirmation. Defaults to the tool name and raw args. */
+  confirmMessage?(args: Record<string, unknown>): string;
   run(args: Record<string, unknown>, ctx: ToolContext): Promise<string>;
 }
 
@@ -19,7 +21,7 @@ export function defineTool(
   description: string,
   params: Record<string, { type: string; description: string; required?: boolean }>,
   run: Tool["run"],
-  opts: { requiresConfirmation?: boolean } = {},
+  opts: Pick<Tool, "requiresConfirmation" | "confirmMessage"> = {},
 ): Tool {
   const properties: Record<string, { type: string; description: string }> = {};
   const required: string[] = [];
