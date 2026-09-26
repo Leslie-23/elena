@@ -1,0 +1,46 @@
+import type { ToolSchema } from "../llm.js";
+
+export interface ToolContext {
+  /** Directory Elena is allowed to read. Paths outside it are rejected. */
+  root: string;
+  /** Ask the user before doing something risky. Resolves true if approved. */
+  confirm(question: string): Promise<boolean>;
+}
+
+export interface Tool {
+  schema: ToolSchema;
+  /** If true, the agent asks the user before running it. Enforced in code, not in the prompt. */
+  requiresConfirmation?: boolean;
+  run(args: Record<string, unknown>, ctx: ToolContext): Promise<string>;
+}
+
+export function defineTool(
+  name: string,
+  description: string,
+  params: Record<string, { type: string; description: string; required?: boolean }>,
+  run: Tool["run"],
+  opts: { requiresConfirmation?: boolean } = {},
+): Tool {
+  const properties: Record<string, { type: string; description: string }> = {};
+  const required: string[] = [];
+  for (const [key, { type, description, required: req }] of Object.entries(params)) {
+    properties[key] = { type, description };
+    if (req) required.push(key);
+  }
+  return {
+    schema: {
+      type: "function",
+      function: { name, description, parameters: { type: "object", properties, required } },
+    },
+    run,
+    ...opts,
+  };
+}
+
+export function str(args: Record<string, unknown>, key: string, fallback?: string): string {
+  const v = args[key];
+  if (typeof v === "string" && v.length > 0) return v;
+  if (typeof v === "number") return String(v);
+  if (fallback !== undefined) return fallback;
+  throw new Error(`Missing required argument: ${key}`);
+}
