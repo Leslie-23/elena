@@ -27,8 +27,16 @@ export interface ToolSchema {
 
 /** Any backend Elena can think with. Swap Ollama for something else by implementing this. */
 export interface LLM {
-  /** `onToken` receives answer text as it is generated, for streaming to the terminal. */
-  chat(messages: Message[], tools: ToolSchema[], onToken?: (text: string) => void): Promise<Message>;
+  chat(messages: Message[], tools: ToolSchema[], opts?: ChatOptions): Promise<Message>;
+}
+
+export interface ChatOptions {
+  /** Receives answer text as it is generated, for streaming to the terminal. */
+  onToken?(text: string): void;
+  /** Called once when the model starts reasoning (thinking mode), which produces no visible text for a while. */
+  onThinking?(): void;
+  /** Override config.think for this call. */
+  think?: boolean;
 }
 
 export class OllamaLLM implements LLM {
@@ -36,23 +44,28 @@ export class OllamaLLM implements LLM {
 
   constructor(private model = config.model) {}
 
-  async chat(messages: Message[], tools: ToolSchema[], onToken?: (text: string) => void): Promise<Message> {
+  async chat(messages: Message[], tools: ToolSchema[], opts: ChatOptions = {}): Promise<Message> {
     const stream = await this.client.chat({
       model: this.model,
       messages,
       tools,
       stream: true,
-      think: config.think,
+      think: opts.think ?? config.think,
       keep_alive: config.keepAlive,
       options: { num_ctx: config.numCtx },
     });
 
     let content = "";
     const toolCalls: ToolCall[] = [];
+    let thinking = false;
     for await (const chunk of stream) {
+      if (chunk.message.thinking && !thinking) {
+        thinking = true;
+        opts.onThinking?.();
+      }
       if (chunk.message.content) {
         content += chunk.message.content;
-        onToken?.(chunk.message.content);
+        opts.onToken?.(chunk.message.content);
       }
       if (chunk.message.tool_calls) toolCalls.push(...(chunk.message.tool_calls as ToolCall[]));
     }

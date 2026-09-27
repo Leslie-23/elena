@@ -9,6 +9,7 @@ export interface AgentEvents {
   onToolCall?(name: string, args: Record<string, unknown>): void;
   onToolResult?(name: string, result: string): void;
   onToken?(text: string): void;
+  onThinking?(): void;
 }
 
 export class Agent {
@@ -19,16 +20,30 @@ export class Agent {
     private ctx: ToolContext,
     private events: AgentEvents = {},
   ) {
-    this.messages = [{ role: "system", content: systemPrompt(ctx.root, ctx.memory.list(ctx.root, config.maxPromptMemories)) }];
+    this.messages = [{ role: "system", content: this.buildSystemPrompt() }];
+  }
+
+  private buildSystemPrompt(): string {
+    const { root, memory } = this.ctx;
+    return systemPrompt(root, memory.list(root, config.maxPromptMemories), memory.getScan(root));
+  }
+
+  /** Rebuild the system prompt, e.g. after a scan finishes. The conversation so far is kept. */
+  refreshSystemPrompt() {
+    this.messages[0] = { role: "system", content: this.buildSystemPrompt() };
   }
 
   /** One user turn: think, call tools, repeat until the model answers in plain text. */
-  async send(userInput: string): Promise<string> {
+  async send(userInput: string, opts: { think?: boolean } = {}): Promise<string> {
     this.messages.push({ role: "user", content: userInput });
     const schemas = tools.map((t) => t.schema);
 
     for (let step = 0; step < config.maxSteps; step++) {
-      const reply = await this.llm.chat(this.messages, schemas, this.events.onToken);
+      const reply = await this.llm.chat(this.messages, schemas, {
+        onToken: this.events.onToken,
+        onThinking: this.events.onThinking,
+        think: opts.think,
+      });
       this.messages.push(reply);
 
       if (!reply.tool_calls?.length) return reply.content;

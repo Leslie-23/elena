@@ -15,6 +15,14 @@ export interface Memory {
   created_at: string;
 }
 
+export interface ProjectScan {
+  root: string;
+  summary: string;
+  git_head: string | null;
+  /** UTC, "YYYY-MM-DD HH:MM:SS" (SQLite datetime format). */
+  scanned_at: string;
+}
+
 export const GLOBAL = "global";
 
 export class MemoryStore {
@@ -31,7 +39,26 @@ export class MemoryStore {
         created_at TEXT NOT NULL DEFAULT (datetime('now'))
       );
       CREATE INDEX IF NOT EXISTS memories_scope ON memories(scope);
+      CREATE TABLE IF NOT EXISTS project_scans (
+        root       TEXT PRIMARY KEY,
+        summary    TEXT NOT NULL,
+        git_head   TEXT,
+        scanned_at TEXT NOT NULL DEFAULT (datetime('now'))
+      );
     `);
+  }
+
+  saveScan(root: string, summary: string, gitHead: string | null) {
+    this.db
+      .prepare(
+        `INSERT INTO project_scans (root, summary, git_head) VALUES (?, ?, ?)
+         ON CONFLICT(root) DO UPDATE SET summary = excluded.summary, git_head = excluded.git_head, scanned_at = datetime('now')`,
+      )
+      .run(root, summary, gitHead);
+  }
+
+  getScan(root: string): ProjectScan | undefined {
+    return this.db.prepare("SELECT * FROM project_scans WHERE root = ?").get(root) as unknown as ProjectScan | undefined;
   }
 
   add(scope: string, content: string): Memory {

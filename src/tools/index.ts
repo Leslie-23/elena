@@ -4,6 +4,7 @@ import { gitDiffTool, gitLogTool, gitStatusTool } from "./git.js";
 import { portOwnerTool } from "./system.js";
 import { runCommandTool } from "./shell.js";
 import { forgetTool, recallTool, rememberTool } from "./memory.js";
+import { listProcessesTool, processLogsTool, scanProjectTool, startProcessTool, stopProcessTool } from "./processes.js";
 
 export const tools: Tool[] = [
   readFileTool,
@@ -14,6 +15,11 @@ export const tools: Tool[] = [
   gitLogTool,
   portOwnerTool,
   runCommandTool,
+  startProcessTool,
+  listProcessesTool,
+  processLogsTool,
+  stopProcessTool,
+  scanProjectTool,
   rememberTool,
   recallTool,
   forgetTool,

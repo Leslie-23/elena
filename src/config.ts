@@ -18,8 +18,13 @@ export const config = {
   maxToolOutput: Number(process.env.ELENA_MAX_TOOL_OUTPUT ?? 4000),
   // Qwen3's reasoning mode is ~7x slower per answer. Off unless ELENA_THINK=1.
   think: process.env.ELENA_THINK === "1",
+  // Reviews use thinking mode by default: in testing it found 3/3 planted bugs vs 1-2/3 without (57s vs 31s).
+  reviewThink: process.env.ELENA_REVIEW_THINK !== "0",
   // Keep the model in memory between questions so it isn't reloaded after 5 idle minutes.
   keepAlive: process.env.ELENA_KEEP_ALIVE ?? "30m",
   commandTimeoutMs: 15_000,
+  logDir: path.join(home, "logs"),
+  // Max characters of diff sent for a review (~16k chars ≈ 4.5k tokens ≈ 40s to read on an M1 Pro).
+  reviewMaxChars: Number(process.env.ELENA_REVIEW_MAX_CHARS ?? 16000),
   debug: process.env.ELENA_DEBUG === "1",
 };
