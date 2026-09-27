@@ -27,6 +27,9 @@ elena ~/Projects/Transport-For-Ghana
 | `ELENA_MODEL` | `qwen3:14b` | Any Ollama model with tool support |
 | `ELENA_NUM_CTX` | `16384` | Context window sent to Ollama |
 | `ELENA_MAX_STEPS` | `12` | Tool-call rounds per question |
+| `ELENA_THINK` | unset | `1` turns on Qwen3 reasoning mode (smarter, ~7x slower) |
+| `ELENA_KEEP_ALIVE` | `30m` | How long Ollama keeps the model loaded between questions |
+| `ELENA_MAX_TOOL_OUTPUT` | `4000` | Characters of tool output sent back to the model |
 | `ELENA_DEBUG` | unset | `1` prints tool output previews |
 | `OLLAMA_HOST` | `http://127.0.0.1:11434` | |
 

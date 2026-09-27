@@ -27,7 +27,8 @@ export interface ToolSchema {
 
 /** Any backend Elena can think with. Swap Ollama for something else by implementing this. */
 export interface LLM {
-  chat(messages: Message[], tools: ToolSchema[]): Promise<Message>;
+  /** `onToken` receives answer text as it is generated, for streaming to the terminal. */
+  chat(messages: Message[], tools: ToolSchema[], onToken?: (text: string) => void): Promise<Message>;
 }
 
 export class OllamaLLM implements LLM {
@@ -35,17 +36,26 @@ export class OllamaLLM implements LLM {
 
   constructor(private model = config.model) {}
 
-  async chat(messages: Message[], tools: ToolSchema[]): Promise<Message> {
-    const res = await this.client.chat({
+  async chat(messages: Message[], tools: ToolSchema[], onToken?: (text: string) => void): Promise<Message> {
+    const stream = await this.client.chat({
       model: this.model,
       messages,
       tools,
+      stream: true,
+      think: config.think,
+      keep_alive: config.keepAlive,
       options: { num_ctx: config.numCtx },
     });
-    return {
-      role: "assistant",
-      content: res.message.content ?? "",
-      tool_calls: res.message.tool_calls as ToolCall[] | undefined,
-    };
+
+    let content = "";
+    const toolCalls: ToolCall[] = [];
+    for await (const chunk of stream) {
+      if (chunk.message.content) {
+        content += chunk.message.content;
+        onToken?.(chunk.message.content);
+      }
+      if (chunk.message.tool_calls) toolCalls.push(...(chunk.message.tool_calls as ToolCall[]));
+    }
+    return { role: "assistant", content, tool_calls: toolCalls.length ? toolCalls : undefined };
   }
 }

@@ -28,8 +28,23 @@ async function main() {
   const rl = createInterface({ input: stdin, output: stdout });
   const confirm = async (q: string) => /^y(es)?$/i.test((await rl.question(chalk.yellow(`? ${q} [y/N] `))).trim());
 
+  // True while answer text is being streamed mid-line, so tool calls and errors start on a new line.
+  let midLine = false;
+  const endLine = () => {
+    if (midLine) stdout.write("\n");
+    midLine = false;
+  };
+
   const agent = new Agent(new OllamaLLM(), { root, confirm }, {
-    onToolCall: (name, args) => console.log(chalk.dim(`  → ${name} ${JSON.stringify(args)}`)),
+    onToken: (text) => {
+      if (!midLine) stdout.write(`\n${chalk.magenta("elena ›")} `);
+      midLine = true;
+      stdout.write(text);
+    },
+    onToolCall: (name, args) => {
+      endLine();
+      console.log(chalk.dim(`  → ${name} ${JSON.stringify(args)}`));
+    },
     onToolResult: (_name, result) => config.debug && console.log(chalk.dim(`    ${preview(result)}`)),
   });
 
@@ -47,10 +62,17 @@ async function main() {
     if (!input) continue;
     if (input === "exit" || input === "quit") break;
 
+    const started = Date.now();
+    let streamed = false;
     try {
       const answer = await agent.send(input);
-      console.log(`\n${chalk.magenta("elena ›")} ${answer}\n`);
+      streamed = midLine;
+      endLine();
+      // Answers that weren't streamed (e.g. hitting the step limit) are printed here.
+      if (!streamed) console.log(`\n${chalk.magenta("elena ›")} ${answer}`);
+      console.log(chalk.dim(`  (${((Date.now() - started) / 1000).toFixed(1)}s)\n`));
     } catch (err) {
+      endLine();
       const msg = err instanceof Error ? err.message : String(err);
       if (/ECONNREFUSED|fetch failed/.test(msg)) {
         console.error(chalk.red(`Can't reach Ollama at ${config.host}. Is it running? (brew services start ollama)`));

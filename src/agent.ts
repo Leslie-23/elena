@@ -8,6 +8,7 @@ import { truncate } from "./tools/exec.js";
 export interface AgentEvents {
   onToolCall?(name: string, args: Record<string, unknown>): void;
   onToolResult?(name: string, result: string): void;
+  onToken?(text: string): void;
 }
 
 export class Agent {
@@ -27,7 +28,7 @@ export class Agent {
     const schemas = tools.map((t) => t.schema);
 
     for (let step = 0; step < config.maxSteps; step++) {
-      const reply = await this.llm.chat(this.messages, schemas);
+      const reply = await this.llm.chat(this.messages, schemas, this.events.onToken);
       this.messages.push(reply);
 
       if (!reply.tool_calls?.length) return reply.content;
