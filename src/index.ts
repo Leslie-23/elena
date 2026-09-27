@@ -22,6 +22,8 @@ import { scanProject } from "./project/scan.js";
 import { buildReview, estimateReadSeconds } from "./review.js";
 import { run } from "./tools/exec.js";
 import { UI } from "./ui.js";
+import { SubagentManager } from "./subagents.js";
+import type { ToolContext } from "./tools/types.js";
 import { fitHistory, titleFrom } from "./conversations.js";
 import {
   formatStatus,
@@ -44,6 +46,9 @@ const HELP = `Commands:
   /ps                background processes Elena started
   /logs <name> [n]   last n lines from a process (default 40)
   /stop <name>       stop a process
+  /bg <task>         send a read-only subagent to investigate in the background
+  /tasks             background tasks and their status
+  /result <n>        read a background task's report
   /resume            recent conversations in this project
   /resume <n>|last   pick up a conversation where you left off
   /new               start a fresh conversation
@@ -86,6 +91,9 @@ function cheatSheet(): string {
     ["/ps", "processes"],
     ["/logs <name>", "output"],
     ["/stop <name>", "stop one"],
+    ["/bg <task>", "background"],
+    ["/tasks", "bg tasks"],
+    ["/result <n>", "bg report"],
     ["/resume", "past chats"],
     ["/new", "fresh chat"],
     ["/mac", "mac health"],
@@ -109,6 +117,7 @@ function cheatSheet(): string {
     "read & search files",
     "git status/diff/log",
     "check ports",
+    "subagents",
     "run commands*",
     "start/stop servers*",
     "remember things",
@@ -120,11 +129,11 @@ function cheatSheet(): string {
   return [
     label("Commands") + rows[0],
     ...rows.slice(1).map((r) => " ".repeat(10) + r),
-    label("Tools") + chalk.dim(tools.slice(0, 3).join(" · ")),
+    label("Tools") + chalk.dim(tools.slice(0, 4).join(" · ")),
     " ".repeat(10) +
-      chalk.dim(tools.slice(3, 6).join(" · ") + "  ") +
+      chalk.dim(tools.slice(4, 7).join(" · ") + "  ") +
       chalk.yellow("*asks first"),
-    " ".repeat(10) + chalk.dim(tools.slice(6).join(" · ")),
+    " ".repeat(10) + chalk.dim(tools.slice(7).join(" · ")),
   ].join("\n");
 }
 
@@ -235,16 +244,53 @@ async function main() {
 
   let conversationId: number | undefined;
 
+  const toolCtx: ToolContext = {
+    root,
+    memory,
+    processes,
+    confirm,
+    notify: (m) => ui.notify(m, "ok"),
+    scan: () => scan(false),
+  };
+
+  const secs = (from: number, to = Date.now()) => ((to - from) / 1000).toFixed(0);
+  const subagents = new SubagentManager({
+    llm: new OllamaLLM(),
+    ctx: toolCtx,
+    pickModel: (task) => {
+      try {
+        return router.pick(classify(task)).model;
+      } catch {
+        return null;
+      }
+    },
+    onToolCall: (id, name, args) => {
+      const label = id === null ? "  ↳ subagent" : `  [#${id}]`;
+      const line = `${label} → ${name} ${JSON.stringify(args)}`;
+      if (id === null) {
+        ui.endLine();
+        console.log(chalk.dim(line));
+      } else ui.notify(line.trim(), "step");
+    },
+    onFinished: (t) => {
+      const first = (t.report ?? "").replace(/\s+/g, " ").trim().slice(0, 90);
+      if (t.status === "done") {
+        ui.notify(
+          `✓ Background task #${t.id} finished (${secs(t.startedAt, t.finishedAt)}s, ${t.steps} steps): ${first}…\n      /result ${t.id} to read it. Elena gets it with your next message.`,
+          "ok",
+        );
+        void alert(`Elena: task #${t.id} done`, first);
+      } else {
+        ui.notify(`Background task #${t.id} failed: ${t.report}`, "error");
+      }
+    },
+  });
+
+  toolCtx.subagents = subagents;
+
   const agent = new Agent(
     new OllamaLLM(),
-    {
-      root,
-      memory,
-      processes,
-      confirm,
-      notify: (m) => ui.notify(m, "ok"),
-      scan: () => scan(false),
-    },
+    toolCtx,
     {
       onToken: (t) => ui.token(t),
       onThinking: () => ui.notify("💭 thinking…", "step"),
@@ -262,6 +308,9 @@ async function main() {
   async function shutdown(code = 0) {
     if (shuttingDown) return;
     shuttingDown = true;
+    const bgRunning = subagents.list().filter((t) => t.status === "running");
+    if (bgRunning.length)
+      ui.notify(`Cancelling background task${bgRunning.length > 1 ? "s" : ""} ${bgRunning.map((t) => `#${t.id}`).join(", ")}.`);
     const running = processes.running().map((p) => p.name);
     if (running.length) {
       ui.notify(`Stopping ${running.join(", ")}…`);
@@ -588,6 +637,48 @@ async function main() {
             : `No running process named "${rest[0] ?? ""}".`,
         );
         return true;
+      case "/bg": {
+        const task = rest.join(" ").trim();
+        if (!task) {
+          ui.notify("Usage: /bg <task>, e.g. /bg find where currentLegIndex is changed", "error");
+          return true;
+        }
+        const started = subagents.startBackground(task);
+        if (typeof started === "string") ui.notify(started, "error");
+        else
+          ui.notify(
+            `🔎 Background task #${started.id} started with ${started.model}. Keep chatting; I'll tell you when it's done.`,
+          );
+        return true;
+      }
+      case "/tasks": {
+        const all = subagents.list();
+        if (!all.length) {
+          ui.notify("No background tasks yet. /bg <task> to start one.");
+          return true;
+        }
+        console.log(
+          all
+            .map((t) => {
+              const state =
+                t.status === "running"
+                  ? chalk.cyan(`running ${secs(t.startedAt)}s`)
+                  : t.status === "done"
+                    ? chalk.green(`done in ${secs(t.startedAt, t.finishedAt)}s`)
+                    : chalk.red("failed");
+              return `  #${t.id}  ${state}  ${chalk.dim(`${t.steps} steps`)}  ${t.task}`;
+            })
+            .join("\n"),
+        );
+        return true;
+      }
+      case "/result": {
+        const t = subagents.get(Number(rest[0]));
+        if (!t) ui.notify(`No background task #${rest[0] ?? ""}. /tasks to list them.`, "error");
+        else if (t.status === "running") ui.notify(`#${t.id} is still running (${t.steps} steps so far).`);
+        else console.log(`  ${chalk.bold(`#${t.id}`)} ${chalk.dim(t.task)}\n\n${t.report}\n`);
+        return true;
+      }
       case "/resume":
         resumeCommand(rest[0]);
         return true;
@@ -705,7 +796,15 @@ async function main() {
 
     const shortcut = SHORTCUTS.find(([re]) => re.test(input))?.[1];
     if (await command(shortcut ?? input)) continue;
-    await turn(input, classify(input, lastTask));
+    // Hand Elena any background reports that finished since her last turn.
+    const reports = subagents.takeUndelivered();
+    if (reports.length)
+      ui.notify(`↪ Giving Elena the report${reports.length > 1 ? "s" : ""} from ${reports.map((t) => `#${t.id}`).join(", ")}.`, "step");
+    const withReports = reports.length
+      ? reports.map((t) => `[Background task #${t.id} (${t.task}) ${t.status === "done" ? "finished" : "failed"}. Report:]\n${t.report}`).join("\n\n") +
+        `\n\n[My message:]\n${input}`
+      : input;
+    await turn(withReports, classify(input, lastTask));
   }
   await shutdown(0);
 }

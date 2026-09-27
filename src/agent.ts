@@ -2,7 +2,7 @@ import { config } from "./config.js";
 import type { LLM, Message } from "./llm.js";
 import { systemPrompt } from "./prompts/system.js";
 import { tools, toolsByName } from "./tools/index.js";
-import type { ToolContext } from "./tools/types.js";
+import type { Tool, ToolContext } from "./tools/types.js";
 import { truncate } from "./tools/exec.js";
 
 export interface AgentEvents {
@@ -14,25 +14,38 @@ export interface AgentEvents {
   onMessage?(message: Message): void;
 }
 
+export interface AgentOptions {
+  /** Tools this agent may use (default: all). Subagents get a read-only subset. */
+  tools?: Tool[];
+  /** Builds the system prompt (default: Elena's). */
+  systemPrompt?: (ctx: ToolContext) => string;
+}
+
 export class Agent {
   private messages: Message[];
+  private tools: Tool[];
+  private toolsByName: Map<string, Tool>;
 
   constructor(
     private llm: LLM,
     private ctx: ToolContext,
     private events: AgentEvents = {},
+    private options: AgentOptions = {},
   ) {
+    this.tools = options.tools ?? tools;
+    this.toolsByName = options.tools ? new Map(this.tools.map((t) => [t.schema.function.name, t])) : toolsByName;
     this.messages = [{ role: "system", content: this.buildSystemPrompt() }];
   }
 
   private buildSystemPrompt(): string {
+    if (this.options.systemPrompt) return this.options.systemPrompt(this.ctx);
     const { root, memory } = this.ctx;
     return systemPrompt(root, memory.list(root, config.maxPromptMemories), memory.getScan(root));
   }
 
   /** Pre-process the system prompt, tools and any loaded history for `model`, so the next reply comes sooner. */
   async warmUp(model: string, think?: boolean): Promise<void> {
-    await this.llm.warm?.(this.messages, tools.map((t) => t.schema), model, think);
+    await this.llm.warm?.(this.messages, this.tools.map((t) => t.schema), model, think);
   }
 
   /** Replace the conversation with `history` (e.g. a resumed one). The system prompt is kept. */
@@ -58,7 +71,7 @@ export class Agent {
   /** One user turn: think, call tools, repeat until the model answers in plain text. */
   async send(userInput: string, opts: { think?: boolean; model?: string } = {}): Promise<string> {
     this.push({ role: "user", content: userInput });
-    const schemas = tools.map((t) => t.schema);
+    const schemas = this.tools.map((t) => t.schema);
 
     for (let step = 0; step < config.maxSteps; step++) {
       const reply = await this.llm.chat(this.messages, schemas, {
@@ -83,8 +96,8 @@ export class Agent {
   }
 
   private async runTool(name: string, args: Record<string, unknown>): Promise<string> {
-    const tool = toolsByName.get(name);
-    if (!tool) return `Unknown tool: ${name}. Available: ${[...toolsByName.keys()].join(", ")}`;
+    const tool = this.toolsByName.get(name);
+    if (!tool) return `Unknown tool: ${name}. Available: ${[...this.toolsByName.keys()].join(", ")}`;
     if (tool.requiresConfirmation) {
       const ok = await this.ctx.confirm(tool.confirmMessage?.(args) ?? `Run ${name} ${JSON.stringify(args)}?`);
       if (!ok) return "User declined.";

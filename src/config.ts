@@ -32,5 +32,7 @@ export const config = {
   notify: process.env.ELENA_NOTIFY !== "0",
   // Answers slower than this also send a notification (if you've switched away).
   notifyAfterSeconds: 20,
+  // Background subagents share the GPU with the main chat, so keep this small.
+  maxBackgroundAgents: 2,
   debug: process.env.ELENA_DEBUG === "1",
 };

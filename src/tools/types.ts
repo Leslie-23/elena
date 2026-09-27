@@ -13,6 +13,13 @@ export interface ToolContext {
   confirm(question: string): Promise<boolean>;
   /** Show the user a status line (e.g. "saved memory"). */
   notify?(message: string): void;
+  /** Hand a task to a subagent. Absent inside subagents, so they can't spawn more. */
+  subagents?: SubagentRunner;
+}
+
+export interface SubagentRunner {
+  /** Foreground: resolves with the report. Background: resolves at once with a note about the started task. */
+  run(task: string, opts: { background: boolean }): Promise<string>;
 }
 
 export interface Tool {

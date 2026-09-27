@@ -57,6 +57,7 @@ elena ~/Projects/Transport-For-Ghana
 | `start_process` | Start a server/watcher in the background. **Asks you first.** Reports when it's up on its port or crashes. |
 | `list_processes` / `process_logs` / `stop_process` | Manage what Elena started |
 | `scan_project` | Scan the project and refresh Elena's summary |
+| `delegate` | Hand an investigation to a read-only subagent, in the foreground or background |
 | `mac_open` | Open an app ("vscode", "chrome"), a URL (`localhost:6969/docs`) or a project file/folder. External websites ask first. |
 | `mac_status` | Battery, disk, memory, CPU load, volume, uptime, front app |
 | `mac_control` | Volume, mute/unmute, screenshot to the Desktop, lock screen (asks first) |
@@ -78,6 +79,8 @@ elena ~/Projects/Transport-For-Ghana
 | `/ps` | Background processes Elena started |
 | `/logs <name> [n]` | Last n lines of a process's output |
 | `/stop <name>` | Stop a process |
+| `/bg <task>` | Send a subagent to investigate in the background; keep chatting |
+| `/tasks`, `/result <n>` | Background tasks, and a finished task's report |
 | `/resume` | Recent conversations in this project; `/resume <n>` or `/resume last` continues one |
 | `/new` | Start a fresh conversation |
 | `/mac` | Mac health |
@@ -102,6 +105,16 @@ Elena sorts each message into a task, with no model call, and uses the best inst
 - Choices made with `/model` are saved in `~/.elena/elena.db`.
 - Override the preference lists in `~/.elena/models.json`, e.g. `{"code": ["devstral:24b", "qwen3:14b"]}`.
 - At startup, and after a scan, the chat model reads Elena's instructions in the background (~14s), so the first reply takes under a second instead.
+
+## Subagents
+
+A subagent is a separate, short-lived Elena with its own context and **read-only** tools: files, search, git, ports, process logs, Mac status and memory search. It can't run commands, start processes, change anything or ask you questions. It returns a short report with file:line evidence.
+
+- **Why:** the model's context is small (16k tokens) and reading input is slow (~120 tokens/s), so letting a subagent read ten files and hand back a paragraph keeps Elena's own conversation short and fast.
+- **Foreground:** Elena calls `delegate` herself for digging-heavy questions (or when you say "use a subagent to…"), and uses the report in her answer.
+- **Background:** `/bg <task>` (or Elena with `background: true`) runs it while you keep chatting. Its tool calls show as `[#1] → …` lines, you get a message (and a macOS notification if you're elsewhere) when it's done, `/result <n>` shows the report, and Elena gets it with your next message.
+- At most 2 run in the background at once. They share the GPU with the main chat; in testing a quick answer took 2.4s instead of ~0.5s while one was running.
+- Subagents can't start subagents.
 
 ## Conversations
 
@@ -162,6 +175,7 @@ src/
   models.ts         per-task model choice and task classifier
   conversations.ts  history trimming for /resume
   mac.ts            macOS status, notifications, volume, app names
+  subagents.ts      read-only subagents, foreground and background
   processes.ts      background process manager
   project/scan.ts   project scanner
   agent.ts          agent loop (think → tool calls → repeat)
