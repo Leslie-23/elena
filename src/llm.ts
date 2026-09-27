@@ -28,6 +28,8 @@ export interface ToolSchema {
 /** Any backend Elena can think with. Swap Ollama for something else by implementing this. */
 export interface LLM {
   chat(messages: Message[], tools: ToolSchema[], opts?: ChatOptions): Promise<Message>;
+  /** Optional: process a prompt ahead of time so the next chat that starts with it is fast. */
+  warm?(messages: Message[], tools: ToolSchema[], model: string, think?: boolean): Promise<void>;
 }
 
 export interface ChatOptions {
@@ -37,16 +39,19 @@ export interface ChatOptions {
   onThinking?(): void;
   /** Override config.think for this call. */
   think?: boolean;
+  /** Which model to use for this call. */
+  model?: string;
 }
 
-export class OllamaLLM implements LLM {
-  private client = new Ollama({ host: config.host });
+/** Shared client for chat, model listing and pulls. */
+export const ollama = new Ollama({ host: config.host });
 
-  constructor(private model = config.model) {}
+export class OllamaLLM implements LLM {
+  constructor(private defaultModel = config.model ?? "qwen3:14b") {}
 
   async chat(messages: Message[], tools: ToolSchema[], opts: ChatOptions = {}): Promise<Message> {
-    const stream = await this.client.chat({
-      model: this.model,
+    const stream = await ollama.chat({
+      model: opts.model ?? this.defaultModel,
       messages,
       tools,
       stream: true,
@@ -70,5 +75,22 @@ export class OllamaLLM implements LLM {
       if (chunk.message.tool_calls) toolCalls.push(...(chunk.message.tool_calls as ToolCall[]));
     }
     return { role: "assistant", content, tool_calls: toolCalls.length ? toolCalls : undefined };
+  }
+
+  /**
+   * Ollama caches the processed prompt, so reading the system prompt and tool list now
+   * (one output token) means the user's first message only has to process their own text.
+   */
+  async warm(messages: Message[], tools: ToolSchema[], model: string, think?: boolean): Promise<void> {
+    // Must match the real request (including `think`), or the cached prompt won't be reused.
+    await ollama.chat({
+      model,
+      messages,
+      tools,
+      think,
+      stream: false,
+      keep_alive: config.keepAlive,
+      options: { num_ctx: config.numCtx, num_predict: 1 },
+    });
   }
 }

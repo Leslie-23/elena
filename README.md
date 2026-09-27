@@ -32,7 +32,7 @@ elena ~/Projects/Transport-For-Ghana
 
 | Variable | Default | |
 |---|---|---|
-| `ELENA_MODEL` | `qwen3:14b` | Any Ollama model with tool support |
+| `ELENA_MODEL` | unset | Force one model for every task (overrides `/model`) |
 | `ELENA_NUM_CTX` | `16384` | Context window sent to Ollama |
 | `ELENA_MAX_STEPS` | `12` | Tool-call rounds per question |
 | `ELENA_THINK` | unset | `1` turns on Qwen3 reasoning mode (smarter, ~7x slower) |
@@ -42,6 +42,7 @@ elena ~/Projects/Transport-For-Ghana
 | `ELENA_MAX_TOOL_OUTPUT` | `4000` | Characters of tool output sent back to the model |
 | `ELENA_DEBUG` | unset | `1` prints tool output previews |
 | `ELENA_HOME` | `~/.elena` | Where the memory database (`elena.db`) lives |
+| `ELENA_NOTIFY` | on | `0` turns off macOS notifications |
 | `OLLAMA_HOST` | `http://127.0.0.1:11434` | |
 
 ## Tools
@@ -56,6 +57,10 @@ elena ~/Projects/Transport-For-Ghana
 | `start_process` | Start a server/watcher in the background. **Asks you first.** Reports when it's up on its port or crashes. |
 | `list_processes` / `process_logs` / `stop_process` | Manage what Elena started |
 | `scan_project` | Scan the project and refresh Elena's summary |
+| `mac_open` | Open an app ("vscode", "chrome"), a URL (`localhost:6969/docs`) or a project file/folder. External websites ask first. |
+| `mac_status` | Battery, disk, memory, CPU load, volume, uptime, front app |
+| `mac_control` | Volume, mute/unmute, screenshot to the Desktop, lock screen (asks first) |
+| `clipboard` | Copy text; reading the clipboard asks first |
 | `remember` / `recall` / `forget` | Save, search and delete memories |
 | `run_command` | Any zsh command. **Always asks you first**, shows the exact command. 30s default timeout (max 300s). |
 
@@ -66,13 +71,47 @@ elena ~/Projects/Transport-For-Ghana
 | `/scan` or "scan the project" | Scan in the background; keep chatting while it runs |
 | `/project` | Show the saved project summary |
 | `/review` or "review my changes" | Review uncommitted changes |
+| `/model` | Installed models, and which one each task uses |
+| `/model <name>` / `/model <task> <name>` | Use a model for everything, or for one task |
+| `/model auto` | Let Elena choose per task again |
+| `/pull <name>` | Download a model in the background, with progress |
 | `/ps` | Background processes Elena started |
 | `/logs <name> [n]` | Last n lines of a process's output |
 | `/stop <name>` | Stop a process |
+| `/resume` | Recent conversations in this project; `/resume <n>` or `/resume last` continues one |
+| `/new` | Start a fresh conversation |
+| `/mac` | Mac health |
 | `/memories`, `/forget <id>` | See and delete memories |
 | `exit` | Quit. Stops any processes Elena started. |
 
 Background events (scan progress, a server coming up, a crash) are printed above the prompt without losing what you're typing.
+
+## Models
+
+Elena sorts each message into a task, with no model call, and uses the best installed model for it:
+
+| Task | Used for | Preferred models, best first |
+|---|---|---|
+| `chat` | questions, git, ports, processes | qwen3:30b, qwen3:14b, gpt-oss:20b, qwen3:8b, llama3.1:8b, qwen3:4b |
+| `code` | explaining, debugging, writing code | qwen3-coder:30b, qwen3:30b, devstral:24b, qwen2.5-coder:14b, qwen3:14b, qwen3:8b |
+| `review` | `/review` | qwen3:30b, gpt-oss:20b, qwen3:14b, qwen3-coder:30b, qwen3:8b (thinking-capable first) |
+
+- Only installed models that support tool calling are used; models too big for your RAM are skipped.
+- If a better model isn't installed, Elena uses the best one you have and suggests `/pull <name>` once per session. She never downloads on her own.
+- Short follow-ups ("and line 40?") stay on the previous model, so it isn't swapped mid-thread. Switching models takes a few seconds to load.
+- Choices made with `/model` are saved in `~/.elena/elena.db`.
+- Override the preference lists in `~/.elena/models.json`, e.g. `{"code": ["devstral:24b", "qwen3:14b"]}`.
+- At startup, and after a scan, the chat model reads Elena's instructions in the background (~14s), so the first reply takes under a second instead.
+
+## Conversations
+
+Every conversation is saved to `~/.elena/elena.db`, per project. `/resume` lists the last 10 and `/resume last` picks up the most recent one, showing where you left off. Long conversations load only the latest messages that fit the model's context (about 34k characters with the default `ELENA_NUM_CTX`), always starting at one of your messages.
+
+## macOS
+
+- The startup screen shows battery, free disk, memory and CPU load, in yellow if something needs attention.
+- When the terminal isn't the front app, Elena sends a macOS notification when she needs your approval, when a server comes up or crashes, when a model download finishes, and when an answer took more than 20 seconds. Nothing is sent while you're watching the terminal.
+- Screenshots need Screen Recording permission for your terminal (System Settings → Privacy & Security).
 
 ## Project scan
 
@@ -120,6 +159,9 @@ src/
   index.ts          CLI / REPL, slash commands
   ui.ts             terminal output that works alongside background tasks
   review.ts         builds the review prompt from git
+  models.ts         per-task model choice and task classifier
+  conversations.ts  history trimming for /resume
+  mac.ts            macOS status, notifications, volume, app names
   processes.ts      background process manager
   project/scan.ts   project scanner
   agent.ts          agent loop (think → tool calls → repeat)
@@ -132,6 +174,5 @@ src/
 
 ## Next
 
-- Save conversation history
 - `elena dev`: start a project's services from its scan in one go
 - Eval set of real questions to compare models

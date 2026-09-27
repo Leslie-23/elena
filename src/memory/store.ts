@@ -2,6 +2,7 @@ import { mkdirSync } from "node:fs";
 import { createRequire } from "node:module";
 import path from "node:path";
 import type { DatabaseSync as DB } from "node:sqlite";
+import type { Message } from "../llm.js";
 
 // Loaded with require (not a static import) so it runs after quiet.ts has filtered
 // Node's "SQLite is experimental" warning. Static imports all load before any code runs.
@@ -23,6 +24,16 @@ export interface ProjectScan {
   scanned_at: string;
 }
 
+export interface ConversationSummary {
+  id: number;
+  root: string;
+  title: string;
+  started_at: string;
+  updated_at: string;
+  /** Number of user messages. */
+  turns: number;
+}
+
 export const GLOBAL = "global";
 
 export class MemoryStore {
@@ -39,6 +50,27 @@ export class MemoryStore {
         created_at TEXT NOT NULL DEFAULT (datetime('now'))
       );
       CREATE INDEX IF NOT EXISTS memories_scope ON memories(scope);
+      CREATE TABLE IF NOT EXISTS conversations (
+        id         INTEGER PRIMARY KEY,
+        root       TEXT NOT NULL,
+        title      TEXT NOT NULL,
+        started_at TEXT NOT NULL DEFAULT (datetime('now')),
+        updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+      CREATE INDEX IF NOT EXISTS conversations_root ON conversations(root, updated_at);
+      CREATE TABLE IF NOT EXISTS messages (
+        id              INTEGER PRIMARY KEY,
+        conversation_id INTEGER NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+        role            TEXT NOT NULL,
+        content         TEXT NOT NULL,
+        tool_calls      TEXT,
+        tool_name       TEXT
+      );
+      CREATE INDEX IF NOT EXISTS messages_conversation ON messages(conversation_id, id);
+      CREATE TABLE IF NOT EXISTS settings (
+        key   TEXT PRIMARY KEY,
+        value TEXT NOT NULL
+      );
       CREATE TABLE IF NOT EXISTS project_scans (
         root       TEXT PRIMARY KEY,
         summary    TEXT NOT NULL,
@@ -46,6 +78,55 @@ export class MemoryStore {
         scanned_at TEXT NOT NULL DEFAULT (datetime('now'))
       );
     `);
+  }
+
+  startConversation(root: string, title: string): number {
+    const row = this.db
+      .prepare("INSERT INTO conversations (root, title) VALUES (?, ?) RETURNING id")
+      .get(root, title) as { id: number };
+    return row.id;
+  }
+
+  addMessage(conversationId: number, m: Message) {
+    this.db
+      .prepare("INSERT INTO messages (conversation_id, role, content, tool_calls, tool_name) VALUES (?, ?, ?, ?, ?)")
+      .run(conversationId, m.role, m.content, m.tool_calls ? JSON.stringify(m.tool_calls) : null, m.tool_name ?? null);
+    this.db.prepare("UPDATE conversations SET updated_at = datetime('now') WHERE id = ?").run(conversationId);
+  }
+
+  /** Most recently active conversations for a project. */
+  listConversations(root: string, limit = 10): ConversationSummary[] {
+    return this.db
+      .prepare(
+        `SELECT c.*, (SELECT count(*) FROM messages m WHERE m.conversation_id = c.id AND m.role = 'user') AS turns
+         FROM conversations c WHERE c.root = ? ORDER BY c.updated_at DESC, c.id DESC LIMIT ?`,
+      )
+      .all(root, limit) as unknown as ConversationSummary[];
+  }
+
+  getMessages(conversationId: number): Message[] {
+    const rows = this.db
+      .prepare("SELECT role, content, tool_calls, tool_name FROM messages WHERE conversation_id = ? ORDER BY id")
+      .all(conversationId) as { role: Message["role"]; content: string; tool_calls: string | null; tool_name: string | null }[];
+    return rows.map((r) => ({
+      role: r.role,
+      content: r.content,
+      ...(r.tool_calls ? { tool_calls: JSON.parse(r.tool_calls) } : {}),
+      ...(r.tool_name ? { tool_name: r.tool_name } : {}),
+    }));
+  }
+
+  getSetting(key: string): string | null {
+    const row = this.db.prepare("SELECT value FROM settings WHERE key = ?").get(key) as { value: string } | undefined;
+    return row?.value ?? null;
+  }
+
+  setSetting(key: string, value: string) {
+    this.db.prepare("INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value").run(key, value);
+  }
+
+  deleteSetting(key: string) {
+    this.db.prepare("DELETE FROM settings WHERE key = ?").run(key);
   }
 
   saveScan(root: string, summary: string, gitHead: string | null) {

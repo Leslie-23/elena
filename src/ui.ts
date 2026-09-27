@@ -69,11 +69,11 @@ export class UI {
   }
 
   /** Ends the turn. Prints `answer` only if it wasn't streamed (e.g. the step-limit message). */
-  finishTurn(answer: string, seconds: number) {
+  finishTurn(answer: string, seconds: number, model?: string) {
     const lastWasStreamed = this.midLine;
     this.endLine();
     if (!lastWasStreamed) console.log(`\n${chalk.magenta("elena ›")} ${answer}`);
-    console.log(chalk.dim(`  (${seconds.toFixed(1)}s)\n`));
+    console.log(chalk.dim(`  (${seconds.toFixed(1)}s${model ? ` · ${model}` : ""})\n`));
   }
 
   endLine() {

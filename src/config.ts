@@ -8,7 +8,9 @@ export const config = {
   // Most recent memories (global + this project) loaded into the system prompt at startup.
   maxPromptMemories: 50,
   host: process.env.OLLAMA_HOST ?? "http://127.0.0.1:11434",
-  model: process.env.ELENA_MODEL ?? "qwen3:14b",
+  home,
+  // Set to force one model for every task. Otherwise Elena picks per task (see models.ts and /model).
+  model: process.env.ELENA_MODEL as string | undefined,
   // Ollama's default context is small; tool output fills it fast.
   numCtx: Number(process.env.ELENA_NUM_CTX ?? 16384),
   // Hard stop so a confused model can't loop forever.
@@ -26,5 +28,9 @@ export const config = {
   logDir: path.join(home, "logs"),
   // Max characters of diff sent for a review (~16k chars ≈ 4.5k tokens ≈ 40s to read on an M1 Pro).
   reviewMaxChars: Number(process.env.ELENA_REVIEW_MAX_CHARS ?? 16000),
+  // macOS notifications for things that need you while the terminal isn't in front.
+  notify: process.env.ELENA_NOTIFY !== "0",
+  // Answers slower than this also send a notification (if you've switched away).
+  notifyAfterSeconds: 20,
   debug: process.env.ELENA_DEBUG === "1",
 };

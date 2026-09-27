@@ -52,23 +52,25 @@ export const listDirectoryTool = defineTool(
 
 export const searchTool = defineTool(
   "search",
-  "Search file contents in the project for a regex pattern. Returns file:line:match.",
+  "Search file contents in the project for a regex pattern (case-insensitive unless it has capitals). Returns file:line:match.",
   {
     pattern: { type: "string", description: "Regex or plain text to search for", required: true },
     path: { type: "string", description: "Subdirectory to limit the search to (default '.')" },
-    glob: { type: "string", description: "Only search files matching this glob, e.g. '*.ts' (optional)" },
+    glob: { type: "string", description: "Only search files matching this glob, e.g. '*.ts' or '*.ts,*.js' (optional)" },
   },
   async (args, ctx) => {
     const dir = await resolveInRoot(ctx.root, str(args, "path", "."));
     const pattern = str(args, "pattern");
-    const glob = typeof args.glob === "string" ? args.glob : undefined;
+    // Models often write "*.ts,*.js" or "*.ts *.js"; rg and grep need one pattern per flag.
+    const globs = typeof args.glob === "string" ? args.glob.split(/[,\s]+/).filter(Boolean) : [];
 
     // `--` ends option parsing so a pattern like "--pre=sh" can't become a flag.
     const res = (await hasRipgrep())
-      ? await run("rg", ["-n", "--max-count", "20", "--max-columns", "300", ...(glob ? ["-g", glob] : []), "--", pattern, "."], dir)
+      ? await run("rg", ["-n", "--smart-case", "--max-count", "20", "--max-columns", "300", ...globs.flatMap((g) => ["-g", g]), "--", pattern, "."], dir)
       : await run(
           "grep",
-          ["-rnE", ...[...IGNORED_DIRS].map((d) => `--exclude-dir=${d}`), ...(glob ? [`--include=${glob}`] : []), "--", pattern, "."],
+          // Same as rg --smart-case: ignore case unless the pattern has capitals.
+          [pattern === pattern.toLowerCase() ? "-rniE" : "-rnE", ...[...IGNORED_DIRS].map((d) => `--exclude-dir=${d}`), ...globs.map((g) => `--include=${g}`), "--", pattern, "."],
           dir,
         );
 
