@@ -19,7 +19,7 @@ export class Agent {
     private ctx: ToolContext,
     private events: AgentEvents = {},
   ) {
-    this.messages = [{ role: "system", content: systemPrompt(ctx.root) }];
+    this.messages = [{ role: "system", content: systemPrompt(ctx.root, ctx.memory.list(ctx.root, config.maxPromptMemories)) }];
   }
 
   /** One user turn: think, call tools, repeat until the model answers in plain text. */

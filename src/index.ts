@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import "./quiet.js";
 import { createInterface } from "node:readline/promises";
 import { stdin, stdout } from "node:process";
 import { existsSync, statSync } from "node:fs";
@@ -7,6 +8,39 @@ import chalk from "chalk";
 import { Agent } from "./agent.js";
 import { config } from "./config.js";
 import { OllamaLLM } from "./llm.js";
+import { MemoryStore, formatMemory } from "./memory/store.js";
+
+const HELP = `Commands:
+  /memories        list what Elena remembers (global + this project)
+  /forget <id>     delete a memory
+  /help            this list
+  exit             quit`;
+
+/** Handle a slash command. Returns false if the input isn't one. */
+function slashCommand(input: string, memory: MemoryStore, root: string): boolean {
+  const [cmd, arg] = input.split(/\s+/, 2);
+  switch (cmd) {
+    case "/memories": {
+      const all = memory.list(root);
+      console.log(all.length ? all.map((m) => "  " + formatMemory(m, root)).join("\n") : chalk.dim("  No memories yet."));
+      return true;
+    }
+    case "/forget": {
+      const id = Number(arg);
+      console.log(Number.isInteger(id) && memory.remove(id) ? `  Forgot #${id}.` : chalk.red(`  No memory #${arg ?? ""}.`));
+      return true;
+    }
+    case "/help":
+      console.log(HELP);
+      return true;
+    default:
+      if (cmd.startsWith("/")) {
+        console.log(chalk.red(`  Unknown command ${cmd}.`) + "\n" + HELP);
+        return true;
+      }
+      return false;
+  }
+}
 
 function preview(text: string, max = 200): string {
   const oneLine = text.replace(/\s+/g, " ").trim();
@@ -35,7 +69,13 @@ async function main() {
     midLine = false;
   };
 
-  const agent = new Agent(new OllamaLLM(), { root, confirm }, {
+  const memory = new MemoryStore(config.dbPath);
+  const notify = (message: string) => {
+    endLine();
+    console.log(chalk.green(`  ${message}`));
+  };
+
+  const agent = new Agent(new OllamaLLM(), { root, memory, confirm, notify }, {
     onToken: (text) => {
       if (!midLine) stdout.write(`\n${chalk.magenta("elena ›")} `);
       midLine = true;
@@ -50,7 +90,9 @@ async function main() {
 
   console.log(chalk.bold.magenta("Elena") + chalk.dim(" — local developer assistant"));
   console.log(chalk.dim(`${greeting()}. Project: ${root}  ·  Model: ${config.model}`));
-  console.log(chalk.dim("Type 'exit' to quit.\n"));
+  const remembered = memory.list(root).length;
+  if (remembered) console.log(chalk.dim(`Remembering ${remembered} thing${remembered === 1 ? "" : "s"} (/memories to see).`));
+  console.log(chalk.dim("Type /help for commands, 'exit' to quit.\n"));
 
   while (true) {
     let input: string;
@@ -61,6 +103,7 @@ async function main() {
     }
     if (!input) continue;
     if (input === "exit" || input === "quit") break;
+    if (slashCommand(input, memory, root)) continue;
 
     const started = Date.now();
     let streamed = false;
@@ -84,6 +127,7 @@ async function main() {
     }
   }
   rl.close();
+  memory.close();
 }
 
 main();

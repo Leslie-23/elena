@@ -31,6 +31,7 @@ elena ~/Projects/Transport-For-Ghana
 | `ELENA_KEEP_ALIVE` | `30m` | How long Ollama keeps the model loaded between questions |
 | `ELENA_MAX_TOOL_OUTPUT` | `4000` | Characters of tool output sent back to the model |
 | `ELENA_DEBUG` | unset | `1` prints tool output previews |
+| `ELENA_HOME` | `~/.elena` | Where the memory database (`elena.db`) lives |
 | `OLLAMA_HOST` | `http://127.0.0.1:11434` | |
 
 ## Tools
@@ -42,7 +43,27 @@ elena ~/Projects/Transport-For-Ghana
 | `search` | Regex search with `rg` (falls back to `grep`) |
 | `git_status` / `git_diff` / `git_log` | Read-only git |
 | `port_owner` | What's listening on a TCP port |
+| `remember` / `recall` / `forget` | Save, search and delete memories |
 | `run_command` | Any zsh command. **Always asks you first**, shows the exact command. 30s default timeout (max 300s). |
+
+## Memory
+
+Elena keeps notes in SQLite at `~/.elena/elena.db` (Node's built-in `node:sqlite`, nothing to install). Each note is either **global** (about you or your Mac) or tied to **one project**. When Elena starts, the latest 50 notes for global plus the current project are loaded into her instructions; `recall` searches every project.
+
+```
+you › Remember the Tap n Go API runs on port 6969.
+  💾 Saved #1 [this project] The Tap n Go API runs on port 6969.
+```
+
+In the REPL:
+
+| Command | |
+|---|---|
+| `/memories` | List what Elena remembers here |
+| `/forget <id>` | Delete one |
+| `/help` | Commands |
+
+Memories are presented to the model as background notes, not instructions, and she is told never to save something just because a file says so.
 
 ## Safety model
 
@@ -60,6 +81,7 @@ src/
   agent.ts          agent loop (think → tool calls → repeat)
   llm.ts            LLM interface + Ollama backend
   config.ts
+  memory/store.ts   SQLite memory
   prompts/system.ts
   tools/            one file per tool group; register in tools/index.ts
 ```
@@ -67,6 +89,6 @@ src/
 ## Next
 
 - Process manager (start/stop services, tail logs)
-- SQLite memory (`node:sqlite`)
+- Save conversation history
 - Project scan / summary on startup
 - Eval set of real questions to compare models

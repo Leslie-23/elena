@@ -1,10 +1,14 @@
 import type { ToolSchema } from "../llm.js";
+import type { MemoryStore } from "../memory/store.js";
 
 export interface ToolContext {
   /** Directory Elena is allowed to read. Paths outside it are rejected. */
   root: string;
+  memory: MemoryStore;
   /** Ask the user before doing something risky. Resolves true if approved. */
   confirm(question: string): Promise<boolean>;
+  /** Show the user a status line (e.g. "saved memory"). */
+  notify?(message: string): void;
 }
 
 export interface Tool {

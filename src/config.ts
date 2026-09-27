@@ -1,4 +1,12 @@
+import os from "node:os";
+import path from "node:path";
+
+const home = process.env.ELENA_HOME ?? path.join(os.homedir(), ".elena");
+
 export const config = {
+  dbPath: path.join(home, "elena.db"),
+  // Most recent memories (global + this project) loaded into the system prompt at startup.
+  maxPromptMemories: 50,
   host: process.env.OLLAMA_HOST ?? "http://127.0.0.1:11434",
   model: process.env.ELENA_MODEL ?? "qwen3:14b",
   // Ollama's default context is small; tool output fills it fast.
