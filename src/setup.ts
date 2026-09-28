@@ -6,8 +6,10 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import chalk from "chalk";
 import { config } from "./config.js";
+import { banner, tagline } from "./brand.js";
 import { ollama } from "./llm.js";
 import { hasRipgrep, run } from "./tools/exec.js";
+import { APP, ensureNotifier } from "./notifier.js";
 
 /**
  * `elena setup`: check this machine and connect Elena to Claude Code and Codex.
@@ -37,7 +39,7 @@ export async function runSetup() {
   const ask = async (q: string) => /^y(es)?$/i.test((await rl.question(chalk.cyan(`    ${q} [y/N] `))).trim());
   const isMac = process.platform === "darwin";
 
-  console.log(chalk.bold.magenta("\nElena setup\n"));
+  console.log("\n" + banner([tagline, chalk.dim("setup")]) + "\n");
 
   // 1. Node
   const major = Number(process.versions.node.split(".")[0]);
@@ -88,6 +90,13 @@ export async function runSetup() {
   // 4. ripgrep (optional)
   if (await hasRipgrep()) ok("ripgrep (fast search)");
   else bad("ripgrep isn't installed; search falls back to grep", isMac ? "brew install ripgrep" : "apt install ripgrep");
+
+  // 4b. macOS notifications that carry Elena's icon
+  if (isMac) {
+    const state = await ensureNotifier();
+    if (state === "unavailable") bad("Notifications will show Script Editor's icon (building Elena.app needs Swift)", "xcode-select --install, then run elena setup again");
+    else ok(`Notifications come from ${APP.replace(os.homedir(), "~")} with Elena's icon${state === "built" ? " (just built)" : ""}`);
+  }
 
   // 5. `elena` on PATH
   const which = await run("which", ["elena"], "/");

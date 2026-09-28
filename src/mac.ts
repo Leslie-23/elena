@@ -1,4 +1,5 @@
 import { run } from "./tools/exec.js";
+import { notifyViaApp } from "./notifier.js";
 
 export const isMac = process.platform === "darwin";
 
@@ -121,8 +122,13 @@ export async function terminalIsFrontmost(): Promise<boolean | undefined> {
   return front?.bundleId ? front.bundleId === mine : undefined;
 }
 
+/**
+ * A macOS notification. Sent from Elena.app so it carries Elena's icon; falls back to osascript
+ * (Script Editor's icon) if the app can't be built or its notifications are turned off.
+ */
 export async function showNotification(title: string, body: string, sound?: string) {
   if (!isMac) return;
+  if (await notifyViaApp(title, body.slice(0, 200), Boolean(sound))) return;
   await osascript(
     [
       "on run argv",

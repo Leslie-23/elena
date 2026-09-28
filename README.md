@@ -1,3 +1,5 @@
+<p align="center"><img src="assets/icon.svg" width="112" alt="Elena icon: a beige e: on terminal green"></p>
+
 # Elena
 
 A local-first developer assistant. The LLM runs on your Mac through Ollama. Elena gives it a small set of typed, sandboxed tools.
@@ -125,6 +127,8 @@ elena ~/Projects/Transport-For-Ghana
 
 Background events (scan progress, a server coming up, a crash) are printed above the prompt without losing what you're typing.
 
+While Elena works, a status line says what she's doing and for how long (`⠹ Reading your message… 3s`, `⠼ Searching for “calculateFare”…`, `⠧ Thinking… 14s`). It clears when her answer starts, pauses for approval prompts, and is left out when output isn't a terminal.
+
 ## Models
 
 Elena sorts each message into a task, with no model call, and uses the best installed model for it:
@@ -219,6 +223,7 @@ Every conversation is saved to `~/.elena/elena.db`, per project. `/resume` lists
 
 - The startup screen shows battery, free disk, memory and CPU load, in yellow if something needs attention.
 - When the terminal isn't the front app, Elena sends a macOS notification when she needs your approval, when a server comes up or crashes, when a model download finishes, and when an answer took more than 20 seconds. Nothing is sent while you're watching the terminal.
+- Notifications come from **Elena.app** (`~/.elena/Elena.app`), a tiny windowless app built from `native/notify.swift` the first time it's needed, so they show Elena's name and `e:` icon instead of Script Editor's. macOS asks once whether Elena may send notifications. Building it needs Swift (Xcode or `xcode-select --install`); without it, or if you turn Elena's notifications off in System Settings, Elena falls back to plain `osascript` notifications.
 - Screenshots need Screen Recording permission for your terminal (System Settings → Privacy & Security).
 
 ## Project scan
@@ -260,16 +265,22 @@ Memories are presented to the model as background notes, not instructions, and s
 - Every command has a timeout and output cap. `run_command` kills the whole process group on timeout, so nothing is left running; long output is trimmed before it reaches the model.
 - Tools marked `requiresConfirmation` are gated in the agent loop (in code, not in the prompt).
 
+## Brand
+
+`assets/icon.svg` (green, the main icon), `assets/icon-light.svg` (beige, for light backgrounds), `assets/icon-macos.svg` (on Apple's icon grid), PNGs from 16 to 1024px in `assets/png/`, and `assets/elena.icns`. In the terminal Elena uses your theme's own green plus beige (`src/brand.ts`), and the startup banner draws the same `e:` in half-block characters.
+
 ## Layout
 
 ```
 src/
   index.ts          CLI / REPL, slash commands
   ui.ts             terminal output that works alongside background tasks
+  brand.ts          colours and the e: banner
   review.ts         builds the review prompt from git
   models.ts         per-task model choice and task classifier
   conversations.ts  history trimming for /resume
   mac.ts            macOS status, notifications, volume, app names
+  notifier.ts       builds Elena.app and posts notifications through it
   subagents.ts      read-only subagents and the background task list
   experts.ts        running Claude Code and Codex headless
   escalate.ts       choosing an expert, approval, background tracking

@@ -30,6 +30,8 @@
   },
   "files": [
     "dist",
+    "native",
+    "assets",
     "README.md"
   ],
   "repository": {

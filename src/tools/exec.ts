@@ -15,12 +15,12 @@ export interface ExecResult {
  * Run a binary with an argv array. No shell, so `;`, `&&`, `$()` and pipes
  * in arguments are inert. Always bounded by a timeout and output cap.
  */
-export function run(file: string, args: string[], cwd: string): Promise<ExecResult> {
+export function run(file: string, args: string[], cwd: string, timeoutMs = config.commandTimeoutMs): Promise<ExecResult> {
   return new Promise((resolve) => {
     execFile(
       file,
       args,
-      { cwd, timeout: config.commandTimeoutMs, maxBuffer: 10 * 1024 * 1024 },
+      { cwd, timeout: timeoutMs, maxBuffer: 10 * 1024 * 1024 },
       (err, stdout, stderr) => {
         const code = err ? (typeof err.code === "number" ? err.code : null) : 0;
         resolve({ ok: !err, stdout: String(stdout), stderr: String(stderr || (err && !stdout ? err.message : "")), code });

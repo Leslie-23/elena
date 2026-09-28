@@ -25,6 +25,8 @@ import { scanProject } from "./project/scan.js";
 import { buildReview, estimateReadSeconds } from "./review.js";
 import { run } from "./tools/exec.js";
 import { UI } from "./ui.js";
+import { banner, tagline } from "./brand.js";
+import { ensureNotifier } from "./notifier.js";
 import { SubagentManager } from "./subagents.js";
 import { Escalation } from "./escalate.js";
 import { EXPERTS, EXPERT_LABELS, type ExpertName } from "./experts.js";
@@ -82,9 +84,7 @@ const SHORTCUTS: [RegExp, string][] = [
   [/^review( (my|the))?( (changes|diff|code))?[.!]?$/i, "/review"],
 ];
 
-const USAGE = `Elena — local developer assistant
-
-Usage:
+const USAGE = `Usage:
   elena [dir]          chat about a project (default: the current folder)
   elena review [dir]   review uncommitted changes and exit
   elena scan [dir]     scan the project, print the summary and exit
@@ -222,7 +222,7 @@ function summarizeModels(router: ModelRouter): string {
 
 async function main() {
   const first = process.argv[2];
-  if (first === "--help" || first === "-h" || first === "help") return console.log(USAGE);
+  if (first === "--help" || first === "-h" || first === "help") return console.log(banner([tagline]) + "\n\n" + USAGE);
   if (first === "--version" || first === "-v") return console.log(version());
   if (first === "update") return runUpdate();
   const { mode, root } = parseArgs(process.argv.slice(2));
@@ -260,7 +260,9 @@ async function main() {
   );
   const confirm = async (q: string) => {
     void alert("Elena needs your OK", q.replace(/\s+/g, " ").trim(), "Glass");
-    return /^y(es)?$/i.test((await ui.ask(chalk.yellow(`? ${q} [y/N] `))).trim());
+    const yes = /^y(es)?$/i.test((await ui.ask(chalk.yellow(`? ${q} [y/N] `))).trim());
+    ui.status(yes ? "Working on it" : "Carrying on"); // the status line paused for the question
+    return yes;
   };
 
   // One scan at a time; the /scan command and the scan_project tool share it.
@@ -322,10 +324,8 @@ async function main() {
     onToolCall: (id, name, args) => {
       const label = id === null ? "  ↳ subagent" : `  [#${id}]`;
       const line = `${label} → ${name} ${JSON.stringify(args)}`;
-      if (id === null) {
-        ui.endLine();
-        console.log(chalk.dim(line));
-      } else ui.notify(line.trim(), "step");
+      // Printed above the status line, which keeps showing that the subagent is working.
+      ui.notify(line.trim(), "step");
     },
     onFinished: (t) => {
       const first = (t.report ?? "").replace(/\s+/g, " ").trim().slice(0, 90);
@@ -363,14 +363,16 @@ async function main() {
     toolCtx,
     {
       onToken: (t) => ui.token(t),
-      onThinking: () => ui.notify("💭 thinking…", "step"),
+      onThinking: () => ui.status("Thinking", "💭 thinking…"),
       onMessage: (m) => {
         conversationId ??= memory.startConversation(root, titleFrom(m.content));
         memory.addMessage(conversationId, m);
       },
       onToolCall: (name, args) => ui.toolCall(name, args),
-      onToolResult: (_name, result) =>
-        config.debug && ui.notify(preview(result), "step"),
+      onToolResult: (_name, result) => {
+        if (config.debug) ui.notify(preview(result), "step");
+        ui.status("Reading the result"); // the model now processes the tool output
+      },
     },
   );
 
@@ -457,6 +459,7 @@ async function main() {
     const wantThink = task === "review" ? config.reviewThink : config.think;
     const started = Date.now();
     try {
+      ui.status(task === "review" ? "Reading the changes" : "Reading your message");
       const answer = await agent.send(input, {
         model,
         think: canThink ? wantThink : undefined,
@@ -466,6 +469,7 @@ async function main() {
       if (seconds > config.notifyAfterSeconds)
         void alert(task === "review" ? "Elena: review ready" : "Elena answered", answer.replace(/\s+/g, " ").trim());
     } catch (err) {
+      ui.stopStatus();
       ui.endLine();
       const msg = err instanceof Error ? err.message : String(err);
       if (/ECONNREFUSED|fetch failed/.test(msg))
@@ -855,11 +859,18 @@ async function main() {
     return shutdown(0);
   }
 
+  const mac = isMac ? statusLine(await macStatus()) : undefined;
   console.log(
-    chalk.bold.magenta("Elena") + chalk.dim(" — local developer assistant"),
-  );
-  console.log(
-    chalk.dim(`${greeting()}. Project: ${root}  ·  ${modelSummary()}`),
+    banner([
+      tagline,
+      // Short enough for an 80-column terminal; /model has the details.
+      chalk.dim(`${greeting()}. ${path.basename(root)} · ${modelSummary().replace(/^Models?: /, "").replace(/ · better ones available, \/model$/, "")}`),
+      mac
+        ? (mac.warn ? chalk.yellow : chalk.dim)(
+            `Mac: ${mac.text.replace(" free", "").replace("memory ", "mem ").replace(/ free/, "").replace(/\/\d+ cores/, "")}`,
+          )
+        : "",
+    ]) + "\n",
   );
   if (!ollamaUp)
     ui.notify(`Can't reach Ollama at ${config.host}. Start it with: brew services start ollama`, "error");
@@ -883,10 +894,6 @@ async function main() {
       chalk.dim(`No project scan yet. Type /scan or say "scan the project".`),
     );
   }
-  if (isMac) {
-    const mac = statusLine(await macStatus());
-    console.log((mac.warn ? chalk.yellow : chalk.dim)(`Mac: ${mac.text}`));
-  }
   const lastChat = memory.listConversations(root, 1)[0];
   if (lastChat)
     console.log(
@@ -901,6 +908,11 @@ async function main() {
     );
   console.log("\n" + cheatSheet());
   warmUp("Starting up");
+  // Build Elena.app (once) so notifications show her icon. Quiet unless it actually builds.
+  if (isMac && config.notify)
+    ensureNotifier()
+      .then((s) => s === "built" && ui.notify("Built ~/.elena/Elena.app, so notifications now show Elena's icon.", "step"))
+      .catch(() => {});
   console.log(chalk.dim(`\ntype 'exit' to quit.\n`));
 
   while (true) {

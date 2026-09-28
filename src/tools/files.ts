@@ -4,6 +4,8 @@ import { defineTool, str } from "./types.js";
 import { hasRipgrep, resolveInRoot, run } from "./exec.js";
 
 const SECRET_PATTERNS = [/\.env$/, /\.env\./, /id_rsa/, /id_ed25519/, /\.pem$/, /\.key$/];
+/** Templates that are meant to be committed and never hold real secrets. */
+const NOT_SECRET = /\.(example|sample|template|dist|defaults)$/i;
 const IGNORED_DIRS = new Set(["node_modules", ".git", "dist", "build", ".next", "Pods", "ios/build"]);
 
 export const readFileTool = defineTool(
@@ -17,7 +19,7 @@ export const readFileTool = defineTool(
   async (args, ctx) => {
     const file = await resolveInRoot(ctx.root, str(args, "path"));
     const rel = path.relative(ctx.root, file);
-    if (SECRET_PATTERNS.some((re) => re.test(rel))) {
+    if (SECRET_PATTERNS.some((re) => re.test(rel)) && !NOT_SECRET.test(rel)) {
       const ok = await ctx.confirm(`Elena wants to read ${rel}, which may contain secrets. Allow?`);
       if (!ok) return "User declined to share this file.";
     }
@@ -65,20 +67,33 @@ export const searchTool = defineTool(
     const globs = typeof args.glob === "string" ? args.glob.split(/[,\s]+/).filter(Boolean) : [];
 
     // `--` ends option parsing so a pattern like "--pre=sh" can't become a flag.
-    const res = (await hasRipgrep())
-      ? await run("rg", ["-n", "--smart-case", "--max-count", "20", "--max-columns", "300", ...globs.flatMap((g) => ["-g", g]), "--", pattern, "."], dir)
-      : await run(
-          "grep",
-          // Same as rg --smart-case: ignore case unless the pattern has capitals.
-          [pattern === pattern.toLowerCase() ? "-rniE" : "-rnE", ...[...IGNORED_DIRS].map((d) => `--exclude-dir=${d}`), ...globs.map((g) => `--include=${g}`), "--", pattern, "."],
-          dir,
-        );
+    const search = async (filters: string[]) =>
+      (await hasRipgrep())
+        ? run("rg", ["-n", "--smart-case", "--max-count", "20", "--max-columns", "300", ...filters.flatMap((g) => ["-g", g]), "--", pattern, "."], dir)
+        : run(
+            "grep",
+            // Same as rg --smart-case: ignore case unless the pattern has capitals.
+            [pattern === pattern.toLowerCase() ? "-rniE" : "-rnE", ...[...IGNORED_DIRS].map((d) => `--exclude-dir=${d}`), ...filters.map((g) => `--include=${g}`), "--", pattern, "."],
+            dir,
+          );
+
+    let res = await search(globs);
+    let note = "";
+    // A too-narrow file filter is the most common way a search misses (e.g. only *.env when the code
+    // is in a .js file), so try every file before reporting nothing.
+    if (res.code === 1 && globs.length) {
+      const wider = await search([]);
+      if (wider.code === 0) {
+        res = wider;
+        note = `No matches in ${globs.join(", ")}; these are from all files:\n`;
+      }
+    }
 
     if (res.code === 1) {
-      return `No matches for "${pattern}"${globs.length ? ` in ${globs.join(", ")}` : ""}. Try a shorter pattern (just the key word or identifier), ` +
+      return `No matches for "${pattern}" in any file. Try a shorter pattern (just the key word or identifier), ` +
         "other words, or read the likely file from the file list, before concluding it isn't there.";
     }
     if (!res.ok) return `Search failed: ${res.stderr}`;
-    return res.stdout;
+    return note + res.stdout;
   },
 );
