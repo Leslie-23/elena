@@ -2,18 +2,30 @@
 
 A local-first developer assistant. The LLM runs on your Mac through Ollama. Elena gives it a small set of typed, sandboxed tools.
 
-## Install on a new machine
+## Install
 
-macOS or Linux, Node 22+:
+macOS or Linux, with git and Node 22+. One line:
 
 ```bash
-git clone https://github.com/Leslie-23/elena.git && cd elena
-npm install    # also builds Elena
-npm link       # puts `elena` on your PATH
-elena setup    # checks Ollama, a model, ripgrep; connects Elena to Claude Code and Codex
+curl -fsSL https://raw.githubusercontent.com/Leslie-23/elena/main/install.sh | bash
 ```
 
-`elena setup` only changes things you say yes to, and is safe to re-run. It suggests a model that fits your RAM (qwen3:14b at 24 GB+, qwen3:8b at 12 GB+, else qwen3:4b). Mac-only features (notifications, volume, `mac_open`) switch themselves off elsewhere.
+Or from a clone:
+
+```bash
+git clone https://github.com/Leslie-23/elena.git && cd elena && ./install.sh
+```
+
+The installer:
+
+1. checks git and Node 22+;
+2. clones Elena into `~/.elena/app` (or uses the clone you ran it from) and builds it;
+3. puts an `elena` command in `~/.local/bin`, the same place Claude Code installs `claude`, and adds that folder to your PATH in `~/.zshrc` / `~/.bashrc` if it isn't there already;
+4. runs `elena setup`, which checks Ollama and a model (suggesting one that fits your RAM) and offers to connect Elena to Claude Code and Codex.
+
+Then type `elena` in any project folder. Re-running the installer is safe. `elena update` pulls the latest version and rebuilds. To uninstall, delete `~/.local/bin/elena` and `~/.elena` (which also deletes Elena's memory and history).
+
+Installer options: `ELENA_DIR` (where the app goes), `ELENA_BIN_DIR` (where the command goes), `ELENA_SKIP_PATH=1`, `ELENA_SKIP_SETUP=1`.
 
 ## Setup
 
@@ -34,6 +46,8 @@ elena review [dir]   # review uncommitted changes and exit
 elena scan [dir]     # scan the project, print the summary and exit
 elena setup          # check this machine; connect Elena to Claude Code / Codex
 elena mcp [dir]      # run as an MCP server (Claude Code and Codex launch this)
+elena update         # update to the latest version
+elena --help         # usage; elena --version for the version
 ```
 
 Install `elena` as a global command:
@@ -69,6 +83,7 @@ elena ~/Projects/Transport-For-Ghana
 | `search` | Regex search with `rg` (falls back to `grep`) |
 | `git_status` / `git_diff` / `git_log` | Read-only git |
 | `port_owner` | What's listening on one TCP port |
+| `calculate` | Exact arithmetic (a parser, not eval) |
 | `listening_ports` | Every listening TCP port with its process, pid, localhost-only or not, and what it probably is |
 | `start_process` | Start a server/watcher in the background. **Asks you first.** Reports when it's up on its port or crashes. |
 | `list_processes` / `process_logs` / `stop_process` | Manage what Elena started |
@@ -173,6 +188,28 @@ Absolute paths are used because agents don't always share your shell's PATH (nvm
 - The client (e.g. Claude Code's permission prompt) approves each tool call. When Elena works through a whole task for the client (`elena_ask`, `elena_review`), nobody can approve her individual steps, so she only gets read-only tools.
 - Processes started this way stop when the client's session ends.
 - Elena in the terminal and Elena as an MCP server share `~/.elena/elena.db` safely (SQLite WAL mode).
+
+## How smart is Elena? (`npm run eval`)
+
+`evals/` builds a small ride-booking project with known answers, a decoy file, a prompt injection and three planted bugs, then asks the same 10 questions (18 checks) of each runner and scores the answers automatically:
+
+```bash
+npm run eval                                 # elena, elena-think, claude
+npm run eval -- --runners elena --only fare  # a subset
+```
+
+Results on an M1 Pro (32 GB), qwen3:14b:
+
+| Runner | Score | Avg time | Cost |
+|---|---|---|---|
+| Claude Code (read-only) | 18/18 (100%) | 16s | ~$0.31 for the run |
+| Elena, first version | 7/18 (39%) | 19s | free |
+| Elena with thinking on everything, first version | 9/18 (50%) | 121s | free |
+| **Elena now** | **17/18 (94%)** | 23s | free |
+
+What moved Elena from 39% to 94% was behaviour, not the model: a file list in her instructions; rules to look at the code before answering, to retry failed searches with looser patterns, to prefer source over tests, and to answer "how do I…" without running it; a `calculate` tool; a hint when a search finds nothing; and a nudge when she says "let me check…" without doing it.
+
+The remaining miss: asked what `calculateFare(0.5, 1)` returns, she computes 6.55 and skips the `minimum` clamp. Tracing every branch of code is a real limit of a 14B model. Claude is also far better on open-ended work (design, large refactors), which this suite doesn't measure; that's what `/claude` is for.
 
 ## Conversations
 

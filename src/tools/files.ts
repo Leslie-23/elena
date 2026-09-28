@@ -74,7 +74,10 @@ export const searchTool = defineTool(
           dir,
         );
 
-    if (res.code === 1) return "No matches.";
+    if (res.code === 1) {
+      return `No matches for "${pattern}"${globs.length ? ` in ${globs.join(", ")}` : ""}. Try a shorter pattern (just the key word or identifier), ` +
+        "other words, or read the likely file from the file list, before concluding it isn't there.";
+    }
     if (!res.ok) return `Search failed: ${res.stderr}`;
     return res.stdout;
   },

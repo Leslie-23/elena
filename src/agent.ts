@@ -1,6 +1,7 @@
 import { config } from "./config.js";
 import type { LLM, Message } from "./llm.js";
 import { systemPrompt } from "./prompts/system.js";
+import { fileListing } from "./project/scan.js";
 import { tools, toolsByName } from "./tools/index.js";
 import type { Tool, ToolContext } from "./tools/types.js";
 import { truncate } from "./tools/exec.js";
@@ -13,6 +14,13 @@ export interface AgentEvents {
   /** Every message added to the conversation (not the system prompt), e.g. to save it. */
   onMessage?(message: Message): void;
 }
+
+/** "Let me check package.json.", "I'll look at…" ending a reply that has no tool call. */
+export const ANNOUNCED_ACTION =
+  /\b(let me|let's|let us|i'll|i will|i'm going to|i am going to|i need to|we need to|we should|next,? (i|we))\b[^.!?\n]{0,80}\b(check|look|search|read|find|open|inspect|run|verify|examine|review)\b[^!?\n]{0,120}$/i;
+
+/** Offers to the user ("let me know if you'd like me to check…") aren't unfinished actions. */
+export const OFFER = /\b(let me know|if you('d| would)? like|would you like|want me to|shall i|should i)\b/i;
 
 export interface AgentOptions {
   /** Tools this agent may use (default: all). Subagents get a read-only subset. */
@@ -40,7 +48,7 @@ export class Agent {
   private buildSystemPrompt(): string {
     if (this.options.systemPrompt) return this.options.systemPrompt(this.ctx);
     const { root, memory } = this.ctx;
-    return systemPrompt(root, memory.list(root, config.maxPromptMemories), memory.getScan(root));
+    return systemPrompt(root, memory.list(root, config.maxPromptMemories), memory.getScan(root), fileListing(root));
   }
 
   /** Pre-process the system prompt, tools and any loaded history for `model`, so the next reply comes sooner. */
@@ -72,6 +80,7 @@ export class Agent {
   async send(userInput: string, opts: { think?: boolean; model?: string } = {}): Promise<string> {
     this.push({ role: "user", content: userInput });
     const schemas = this.tools.map((t) => t.schema);
+    let nudged = false;
 
     for (let step = 0; step < config.maxSteps; step++) {
       const reply = await this.llm.chat(this.messages, schemas, {
@@ -82,7 +91,16 @@ export class Agent {
       });
       this.push(reply);
 
-      if (!reply.tool_calls?.length) return reply.content;
+      if (!reply.tool_calls?.length) {
+        // Local models often end with "Let me check package.json." and never call the tool.
+        const tail = reply.content.slice(-300);
+        if (!nudged && ANNOUNCED_ACTION.test(tail) && !OFFER.test(tail)) {
+          nudged = true;
+          this.push({ role: "user", content: "Go ahead and do that now with your tools, then answer." });
+          continue;
+        }
+        return reply.content;
+      }
 
       for (const call of reply.tool_calls) {
         const { name, arguments: args } = call.function;

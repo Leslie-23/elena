@@ -1,3 +1,5 @@
+import { execFileSync } from "node:child_process";
+import { readdirSync } from "node:fs";
 import { readFile, readdir } from "node:fs/promises";
 import path from "node:path";
 import { hasRipgrep, run } from "../tools/exec.js";
@@ -199,4 +201,50 @@ export async function scanProject(root: string, onStep: (msg: string) => void = 
     .join(" · ");
 
   return { summary: lines.join("\n"), headline, gitHead: git?.head ?? null, ms: Date.now() - started };
+}
+
+/**
+ * A compact list of the project's files, grouped by folder, for the system prompt, so the model knows
+ * what exists before it searches. Uses git's view of the tree when available (respects .gitignore).
+ * Big projects are cut to the first `maxFiles` files, with a note.
+ */
+export function fileListing(root: string, maxFiles = 150): string {
+  let files: string[] = [];
+  try {
+    files = execFileSync("git", ["ls-files", "--cached", "--others", "--exclude-standard"], {
+      cwd: root,
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+      maxBuffer: 20 * 1024 * 1024,
+    })
+      .split("\n")
+      .filter(Boolean);
+  } catch {
+    // Not a git repo: walk the tree, skipping dependency and build folders.
+    const walk = (dir: string, depth: number) => {
+      if (depth > 4 || files.length > maxFiles * 4) return;
+      for (const e of readdirSync(path.join(root, dir), { withFileTypes: true })) {
+        const rel = dir ? `${dir}/${e.name}` : e.name;
+        if (e.isDirectory()) {
+          if (!SKIP_DIRS.has(e.name) && !e.name.startsWith(".")) walk(rel, depth + 1);
+        } else files.push(rel);
+      }
+    };
+    try {
+      walk("", 0);
+    } catch {
+      return "";
+    }
+  }
+  if (!files.length) return "";
+
+  const total = files.length;
+  const byDir = new Map<string, string[]>();
+  for (const f of files.slice(0, maxFiles)) {
+    const dir = path.posix.dirname(f);
+    byDir.set(dir, [...(byDir.get(dir) ?? []), path.posix.basename(f)]);
+  }
+  const lines = [...byDir].map(([dir, names]) => `${dir === "." ? "./" : dir + "/"}: ${names.join("  ")}`);
+  if (total > maxFiles) lines.push(`(…and ${total - maxFiles} more files; use list_directory or search)`);
+  return lines.join("\n");
 }

@@ -2,7 +2,10 @@
 import "./quiet.js";
 import { createInterface } from "node:readline/promises";
 import { stdin, stdout } from "node:process";
-import { existsSync, statSync } from "node:fs";
+import { existsSync, readFileSync, statSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { createRequire } from "node:module";
+import { fileURLToPath } from "node:url";
 import path from "node:path";
 import chalk from "chalk";
 import { Agent } from "./agent.js";
@@ -78,6 +81,41 @@ const SHORTCUTS: [RegExp, string][] = [
   [/^(re)?scan( (the|this|my) (project|repo|codebase))?[.!]?$/i, "/scan"],
   [/^review( (my|the))?( (changes|diff|code))?[.!]?$/i, "/review"],
 ];
+
+const USAGE = `Elena — local developer assistant
+
+Usage:
+  elena [dir]          chat about a project (default: the current folder)
+  elena review [dir]   review uncommitted changes and exit
+  elena scan [dir]     scan the project, print the summary and exit
+  elena setup          check Ollama and a model; connect Elena to Claude Code / Codex
+  elena mcp [dir]      run as an MCP server (what Claude Code and Codex launch)
+  elena update         update Elena to the latest version
+  elena --version      print the version
+
+Inside Elena, type /help for commands.`;
+
+function version(): string {
+  return (createRequire(import.meta.url)("../package.json") as { version: string }).version;
+}
+
+/** `elena update`: pull the latest code and rebuild, in the folder Elena runs from. */
+function runUpdate() {
+  const app = process.env.ELENA_APP_DIR ?? path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+  const step = (cmd: string, args: string[]) => {
+    console.log(chalk.dim(`$ ${cmd} ${args.join(" ")}`));
+    const r = spawnSync(cmd, args, { cwd: app, stdio: "inherit" });
+    if (r.status !== 0) {
+      console.error(chalk.red(`\n${cmd} failed. Nothing else was changed; fix the above and run \`elena update\` again.`));
+      process.exit(r.status ?? 1);
+    }
+  };
+  const before = version();
+  step("git", ["pull", "--ff-only"]);
+  step("npm", ["install", "--no-fund", "--no-audit", "--loglevel=error"]);
+  const after = (JSON.parse(readFileSync(path.join(app, "package.json"), "utf8")) as { version: string }).version;
+  console.log(chalk.green(`\n✓ Elena ${before === after ? `is up to date (${after})` : `updated ${before} → ${after}`}.`));
+}
 
 type Mode = "chat" | "review" | "scan" | "mcp" | "setup";
 const MODES = ["review", "scan", "mcp", "setup"];
@@ -183,9 +221,13 @@ function summarizeModels(router: ModelRouter): string {
 }
 
 async function main() {
+  const first = process.argv[2];
+  if (first === "--help" || first === "-h" || first === "help") return console.log(USAGE);
+  if (first === "--version" || first === "-v") return console.log(version());
+  if (first === "update") return runUpdate();
   const { mode, root } = parseArgs(process.argv.slice(2));
   if (!existsSync(root) || !statSync(root).isDirectory()) {
-    console.error(chalk.red(`Not a directory: ${root}`));
+    console.error(chalk.red(`Not a directory: ${root}`) + chalk.dim("\n\n" + USAGE));
     process.exit(1);
   }
   // These own stdin/stdout themselves, so they start before the chat UI is created.
