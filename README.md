@@ -68,7 +68,8 @@ elena ~/Projects/Transport-For-Ghana
 | `list_directory` | List a directory, skipping `node_modules`, `.git`, build output |
 | `search` | Regex search with `rg` (falls back to `grep`) |
 | `git_status` / `git_diff` / `git_log` | Read-only git |
-| `port_owner` | What's listening on a TCP port |
+| `port_owner` | What's listening on one TCP port |
+| `listening_ports` | Every listening TCP port with its process, pid, localhost-only or not, and what it probably is |
 | `start_process` | Start a server/watcher in the background. **Asks you first.** Reports when it's up on its port or crashes. |
 | `list_processes` / `process_logs` / `stop_process` | Manage what Elena started |
 | `scan_project` | Scan the project and refresh Elena's summary |

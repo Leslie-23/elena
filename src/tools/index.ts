@@ -1,7 +1,7 @@
 import type { Tool } from "./types.js";
 import { listDirectoryTool, readFileTool, searchTool } from "./files.js";
 import { gitDiffTool, gitLogTool, gitStatusTool } from "./git.js";
-import { portOwnerTool } from "./system.js";
+import { listeningPortsTool, portOwnerTool } from "./system.js";
 import { runCommandTool } from "./shell.js";
 import { forgetTool, recallTool, rememberTool } from "./memory.js";
 import { askExpertTool, delegateTool } from "./agents.js";
@@ -16,6 +16,7 @@ export const tools: Tool[] = [
   gitDiffTool,
   gitLogTool,
   portOwnerTool,
+  listeningPortsTool,
   runCommandTool,
   startProcessTool,
   listProcessesTool,

@@ -43,7 +43,7 @@ important claims yourself.`;
 /** What Elena may use when running a task for another agent: look, never change. */
 const DELEGATED_TOOLS = new Set([
   "read_file", "list_directory", "search", "git_status", "git_diff", "git_log",
-  "port_owner", "list_processes", "process_logs", "mac_status", "recall",
+  "port_owner", "listening_ports", "list_processes", "process_logs", "mac_status", "recall",
 ]);
 
 function delegatedPrompt(ctx: ToolContext): string {
@@ -150,7 +150,7 @@ export async function runMcpServer(defaultRoot: string) {
     {
       title: "Ask Elena",
       description:
-        "Hand Elena a small, self-contained task to do locally with her read-only tools (files, search, git, ports, logs), " +
+        "Hand Elena a small, self-contained task to do locally with her read-only tools (files, search, git, listening ports, process logs), " +
         "e.g. 'summarise the errors in logs/api.log' or 'find where currentLegIndex is changed'. Runs on the local model: " +
         "free and private, but slower and weaker than you. Usually 10-60s; set background to get a task id and poll elena_task.",
       inputSchema: { task: z.string().describe("What to do, with everything Elena needs to know"), project_dir: projectDir, background },

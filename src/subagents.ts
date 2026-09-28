@@ -8,7 +8,7 @@ import type { SubagentRunner, ToolContext } from "./tools/types.js";
 /** Subagents only look; they never change anything or need the user's approval. */
 const READ_ONLY = new Set([
   "read_file", "list_directory", "search", "git_status", "git_diff", "git_log",
-  "port_owner", "list_processes", "process_logs", "mac_status", "recall",
+  "port_owner", "listening_ports", "list_processes", "process_logs", "mac_status", "recall",
 ]);
 const subagentTools = tools.filter((t) => READ_ONLY.has(t.schema.function.name));
 
