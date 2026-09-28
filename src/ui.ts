@@ -60,6 +60,13 @@ export class UI {
     this.rl = rl;
   }
 
+  get isWaitingForInput(): boolean {
+    return this.waitingForInput;
+  }
+
+  /** Something to show at the end of the status line, e.g. the context bar. */
+  statusSuffix?: () => string;
+
   async ask(prompt: string): Promise<string> {
     if (!this.rl) throw new Error("UI not attached");
     this.stopStatus(); // an approval prompt replaces the spinner
@@ -124,7 +131,8 @@ export class UI {
     const s = this.spin;
     const secs = Math.floor((Date.now() - s.since) / 1000);
     const frame = FRAMES[s.frame++ % FRAMES.length];
-    const line = `${chalk.cyan(frame)} ${chalk.dim(`${s.label}…${secs >= 1 ? ` ${secs}s` : ""}`)}`;
+    const suffix = this.statusSuffix ? `  ${this.statusSuffix()}` : "";
+    const line = `${chalk.cyan(frame)} ${chalk.dim(`${s.label}…${secs >= 1 ? ` ${secs}s` : ""}`)}${suffix}`;
     stdout.write("\r\x1b[2K" + line);
   }
 
@@ -145,12 +153,12 @@ export class UI {
   }
 
   /** Ends the turn. Prints `answer` only if it wasn't streamed (e.g. the step-limit message). */
-  finishTurn(answer: string, seconds: number, model?: string) {
+  finishTurn(answer: string, seconds: number, model?: string, extra?: string) {
     this.stopStatus();
     const lastWasStreamed = this.midLine;
     this.endLine();
     if (!lastWasStreamed) console.log(`\n${green.bold("elena ›")} ${answer}`);
-    console.log(chalk.dim(`  (${seconds.toFixed(1)}s${model ? ` · ${model}` : ""})\n`));
+    console.log(chalk.dim(`  (${seconds.toFixed(1)}s${model ? ` · ${model}` : ""}`) + (extra ? chalk.dim(" · ") + extra : "") + chalk.dim(")") + "\n");
   }
 
   endLine() {

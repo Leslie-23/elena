@@ -34,5 +34,9 @@ export const config = {
   notifyAfterSeconds: 20,
   // Background subagents share the GPU with the main chat, so keep this small.
   maxBackgroundAgents: 2,
+  // Compact automatically when the context is this full (Ollama silently drops the start of the prompt,
+  // Elena's instructions, if it overflows), aiming to get back under compactTarget.
+  compactAt: Number(process.env.ELENA_COMPACT_AT ?? 0.75),
+  compactTarget: Number(process.env.ELENA_COMPACT_TARGET ?? 0.5),
   debug: process.env.ELENA_DEBUG === "1",
 };

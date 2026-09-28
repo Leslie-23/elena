@@ -41,6 +41,8 @@ export interface ChatOptions {
   think?: boolean;
   /** Which model to use for this call. */
   model?: string;
+  /** Token counts Ollama reports once the reply is done (the prompt count covers the whole context, cached or not). */
+  onUsage?(usage: { promptTokens: number; outputTokens: number }): void;
 }
 
 /** Shared client for chat, model listing and pulls. */
@@ -73,6 +75,9 @@ export class OllamaLLM implements LLM {
         opts.onToken?.(chunk.message.content);
       }
       if (chunk.message.tool_calls) toolCalls.push(...(chunk.message.tool_calls as ToolCall[]));
+      if (chunk.done && typeof chunk.prompt_eval_count === "number") {
+        opts.onUsage?.({ promptTokens: chunk.prompt_eval_count, outputTokens: chunk.eval_count ?? 0 });
+      }
     }
     return { role: "assistant", content, tool_calls: toolCalls.length ? toolCalls : undefined };
   }

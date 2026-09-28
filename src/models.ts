@@ -31,6 +31,9 @@ const KNOWN_SIZES_GB: Record<string, number> = {
   "gpt-oss:20b": 13.8, "devstral:24b": 14.3, "qwen2.5-coder:14b": 9.0, "llama3.1:8b": 4.9,
 };
 
+/** Models Elena knows are a good fit, for autocompleting /pull. */
+export const KNOWN_MODELS = Object.keys(KNOWN_SIZES_GB);
+
 export interface ModelInfo {
   name: string;
   sizeGB: number;

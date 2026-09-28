@@ -3,3 +3,4 @@ dist/
 data/
 .env
 evals/results/
+.DS_Store

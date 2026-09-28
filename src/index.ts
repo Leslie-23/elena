@@ -2,8 +2,8 @@
 import "./quiet.js";
 import { createInterface } from "node:readline/promises";
 import { stdin, stdout } from "node:process";
-import { existsSync, readFileSync, statSync } from "node:fs";
-import { spawnSync } from "node:child_process";
+import { existsSync, readFileSync, statSync, watch } from "node:fs";
+import { spawn, spawnSync } from "node:child_process";
 import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
@@ -13,6 +13,7 @@ import { config } from "./config.js";
 import { OllamaLLM, ollama } from "./llm.js";
 import { MemoryStore, formatMemory } from "./memory/store.js";
 import {
+  KNOWN_MODELS,
   ModelRouter,
   TASKS,
   TASK_LABELS,
@@ -25,6 +26,7 @@ import { scanProject } from "./project/scan.js";
 import { buildReview, estimateReadSeconds } from "./review.js";
 import { run } from "./tools/exec.js";
 import { UI } from "./ui.js";
+import { Autosuggest, completions, type CommandSpec } from "./completion.js";
 import { banner, tagline } from "./brand.js";
 import { ensureNotifier } from "./notifier.js";
 import { SubagentManager } from "./subagents.js";
@@ -65,6 +67,9 @@ const HELP = `Commands:
   /resume            recent conversations in this project
   /resume <n>|last   pick up a conversation where you left off
   /new               start a fresh conversation
+  /context           what's filling Elena's context window
+  /compact           trim old tool output and summarise older messages to free up context
+  /reload            restart Elena with her latest code, keeping this conversation
   /mac               Mac health: battery, disk, memory, load, volume
   /memories          what Elena remembers here
   /forget <id>       delete a memory
@@ -142,6 +147,9 @@ function cheatSheet(): string {
     ["/result <n>", "bg report"],
     ["/resume", "past chats"],
     ["/new", "fresh chat"],
+    ["/context", "context use"],
+    ["/compact", "free context"],
+    ["/reload", "new code"],
     ["/mac", "mac health"],
     ["/memories", "notes"],
     ["/forget <id>", "delete note"],
@@ -242,7 +250,14 @@ async function main() {
     if ((await terminalIsFrontmost()) === true) return;
     await showNotification(title, body, sound).catch(() => {});
   }
-  const rl = createInterface({ input: stdin, output: stdout });
+  // Slash commands for autocomplete; filled in once the things they complete (models, processes…) exist.
+  let commandSpecs: CommandSpec[] = [];
+  const rl = createInterface({
+    input: stdin,
+    output: stdout,
+    // Tab: complete the command (or its argument); a second Tab lists the options when there are several.
+    completer: (line: string): [string[], string] => [completions(line, commandSpecs), line],
+  });
   ui.attach(rl);
 
   const memory = new MemoryStore(config.dbPath);
@@ -466,6 +481,7 @@ async function main() {
       });
       const seconds = (Date.now() - started) / 1000;
       ui.finishTurn(answer, seconds, model);
+      await autoCompact(model);
       if (seconds > config.notifyAfterSeconds)
         void alert(task === "review" ? "Elena: review ready" : "Elena answered", answer.replace(/\s+/g, " ").trim());
     } catch (err) {
@@ -647,6 +663,89 @@ async function main() {
   }
 
   /** `/resume` lists conversations; `/resume <n>` or `/resume last` loads one. */
+  /** "context ▰▰▰▱▱▱▱▱▱▱ 31% of 16k", green → yellow → red as it fills. */
+  function contextMeter(): string {
+    const { used, limit } = agent.contextUsage();
+    const pct = Math.min(100, Math.round((used / limit) * 100));
+    const filled = Math.min(10, Math.round(pct / 10));
+    const color = pct >= 80 ? chalk.red : pct >= 60 ? chalk.yellow : chalk.green;
+    return chalk.dim("context ") + color("▰".repeat(filled)) + chalk.dim("▱".repeat(10 - filled)) + chalk.dim(` ${pct}% of ${Math.round(limit / 1000)}k`);
+  }
+
+  const fmtK = (n: number) => (n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n));
+
+  /** The short version, always shown in the prompt: "▰▰▱▱▱▱▱▱▱▱ 20%". */
+  function contextBar(): string {
+    const { used, limit } = agent.contextUsage();
+    const pct = Math.min(100, Math.round((used / limit) * 100));
+    const filled = Math.min(10, Math.round(pct / 10));
+    const color = pct >= 80 ? chalk.red : pct >= 60 ? chalk.yellow : chalk.green;
+    return color("▰".repeat(filled)) + chalk.dim("▱".repeat(10 - filled) + ` ${pct}%`);
+  }
+
+  function showContext() {
+    const { used, limit, exact } = agent.contextUsage();
+    console.log(`  ${contextMeter()}  ${chalk.dim(`(${fmtK(used)} tokens${exact ? "" : ", estimated"})`)}`);
+    for (const part of agent.contextBreakdown()) {
+      const pct = Math.round((part.tokens / limit) * 100);
+      console.log(`    ${fmtK(part.tokens).padStart(6)}  ${chalk.dim(`${String(pct).padStart(2)}%`)}  ${part.label}`);
+    }
+    console.log(chalk.dim(`  Elena compacts automatically at ${Math.round(config.compactAt * 100)}%. /compact to do it now, /new to start fresh.`));
+  }
+
+  /** Trim old tool output, then summarise older messages if that wasn't enough. */
+  async function compact(model: string, reason: string, quiet = false) {
+    const before = agent.contextUsage().used;
+    ui.status("Compacting the conversation");
+    const trimmed = agent.pruneToolResults();
+    let summarized = false;
+    if (agent.contextUsage().used / config.numCtx > config.compactTarget) {
+      try {
+        summarized = await agent.summarizeHistory(model);
+      } catch (err) {
+        ui.stopStatus();
+        ui.notify(`Couldn't summarise: ${err instanceof Error ? err.message : String(err)}`, "error");
+      }
+    }
+    ui.stopStatus();
+    const after = agent.contextUsage().used;
+    if (!trimmed && !summarized) return quiet ? undefined : ui.notify("Nothing to compact yet: the conversation is all recent or already short.");
+    const what = [trimmed && `trimmed ${trimmed} old tool result${trimmed === 1 ? "" : "s"}`, summarized && "summarised older messages"].filter(Boolean).join(" and ");
+    ui.notify(`🗜 ${reason}: ${what}. Context ${fmtK(before)} → ${fmtK(after)} tokens (${Math.round((after / config.numCtx) * 100)}%).`, "ok");
+  }
+
+  /**
+   * Restart with the code on disk, keeping this conversation. The process is replaced in place
+   * (process.execve), so reloads don't stack up; older Node falls back to a child process.
+   */
+  async function reload() {
+    const running = processes.running().map((p) => p.name);
+    const tasks = subagents.list().filter((t) => t.status === "running").map((t) => `task #${t.id}`);
+    if (running.length || tasks.length) {
+      const ok = await confirm(`Reloading stops ${[...running, ...tasks].join(", ")}. Continue?`);
+      ui.stopStatus();
+      if (!ok) return;
+    }
+    ui.notify("↻ Reloading Elena with her latest code…");
+    subagents.cancelAll();
+    await processes.stopAll();
+    const env = { ...process.env, ELENA_RESUME: conversationId ? String(conversationId) : "0" };
+    const argv = [process.execPath, process.argv[1], ...process.argv.slice(2)];
+    rl.close();
+    memory.close();
+    const execve = (process as unknown as { execve?: (file: string, args: string[], env: NodeJS.ProcessEnv) => never }).execve;
+    if (execve) execve(process.execPath, argv, env);
+    // Node < 22.15: run the new version as a child that takes over the terminal, and exit with it.
+    process.removeAllListeners("SIGINT");
+    process.on("SIGINT", () => {}); // Ctrl+C belongs to the new Elena now
+    spawn(process.execPath, argv.slice(1), { stdio: "inherit", env }).on("exit", (code) => process.exit(code ?? 0));
+    await new Promise(() => {}); // wait here until the child exits
+  }
+
+  async function autoCompact(model: string) {
+    if (agent.contextUsage().used / config.numCtx >= config.compactAt) await compact(model, "Context was getting full", true);
+  }
+
   function resumeCommand(arg?: string) {
     const past = memory.listConversations(root, 10);
     if (!arg) {
@@ -665,12 +764,20 @@ async function main() {
     const pick = arg === "last" ? others[0] : past[Number(arg) - 1];
     if (!pick) return ui.notify(arg === "last" ? "No earlier conversation to resume." : `No conversation #${arg}. /resume to list them.`, "error");
     if (pick.id === conversationId) return ui.notify("That's the conversation you're in.");
+    loadConversation(pick, false);
+  }
 
+  function loadConversation(pick: { id: number; title: string; turns: number; updated_at: string }, afterReload: boolean) {
     const { kept, dropped } = fitHistory(memory.getMessages(pick.id));
     agent.loadHistory(kept);
     conversationId = pick.id;
     lastTask = undefined;
-    ui.notify(`↺ Resumed "${pick.title}" (${pick.turns} turn${pick.turns === 1 ? "" : "s"}, last active ${ago(pick.updated_at)}).`, "ok");
+    ui.notify(
+      afterReload
+        ? `↺ Reloaded with the latest code. Still in "${pick.title}".`
+        : `↺ Resumed "${pick.title}" (${pick.turns} turn${pick.turns === 1 ? "" : "s"}, last active ${ago(pick.updated_at)}).`,
+      "ok",
+    );
     if (dropped)
       ui.notify(`Loaded the latest ${kept.length} messages; the ${dropped} before them are too long to fit in the model's context.`, "step");
 
@@ -805,6 +912,23 @@ async function main() {
       case "/resume":
         resumeCommand(rest[0]);
         return true;
+      case "/context":
+        showContext();
+        return true;
+      case "/compact": {
+        let model: string;
+        try {
+          model = router.pick("chat").model;
+        } catch (err) {
+          ui.notify(err instanceof Error ? err.message : String(err), "error");
+          return true;
+        }
+        await compact(model, "Compacted");
+        return true;
+      }
+      case "/reload":
+        await reload();
+        return true;
       case "/new":
         agent.reset();
         conversationId = undefined;
@@ -894,7 +1018,7 @@ async function main() {
       chalk.dim(`No project scan yet. Type /scan or say "scan the project".`),
     );
   }
-  const lastChat = memory.listConversations(root, 1)[0];
+  const lastChat = process.env.ELENA_RESUME === undefined ? memory.listConversations(root, 1)[0] : undefined;
   if (lastChat)
     console.log(
       chalk.dim(`Last conversation ${ago(lastChat.updated_at)}: "${lastChat.title}" (/resume last).`),
@@ -906,8 +1030,70 @@ async function main() {
         `Remembering ${remembered} thing${remembered === 1 ? "" : "s"} (/memories to see).`,
       ),
     );
-  console.log("\n" + cheatSheet());
-  warmUp("Starting up");
+  const processNames = () => processes.list().map((p) => p.name);
+  const taskIds = () => subagents.list().map((t) => String(t.id));
+  commandSpecs = [
+    { name: "/context", about: "what's filling the context window" },
+    { name: "/compact", about: "free up context" },
+    { name: "/scan", about: "scan the project in the background" },
+    { name: "/review", about: "review uncommitted changes", args: (w) => (w.length ? [] : ["claude", "codex"]) },
+    { name: "/resume", about: "pick up a past conversation", args: (w) => (w.length ? [] : ["last", ...memory.listConversations(root, 10).map((_, i) => String(i + 1))]) },
+    {
+      name: "/model",
+      about: "which model each task uses",
+      args: (w) => {
+        const models = router.list().filter((m) => m.tools).map((m) => m.name);
+        if (!w.length) return ["auto", ...TASKS, ...models];
+        return (TASKS as string[]).includes(w[0]) && w.length === 1 ? ["auto", ...models] : [];
+      },
+    },
+    { name: "/ps", about: "background processes" },
+    { name: "/logs", about: "a process's output", args: (w) => (w.length ? [] : processNames()) },
+    { name: "/stop", about: "stop a process", args: (w) => (w.length ? [] : processNames()) },
+    { name: "/claude", about: "hand a task to Claude Code", args: (w) => (w.length ? [] : ["edit"]) },
+    { name: "/codex", about: "hand a task to Codex", args: (w) => (w.length ? [] : ["edit"]) },
+    { name: "/bg", about: "investigate in the background" },
+    { name: "/tasks", about: "background tasks" },
+    { name: "/result", about: "a background task's report", args: (w) => (w.length ? [] : taskIds()) },
+    { name: "/cancel", about: "stop a background task", args: (w) => (w.length ? [] : taskIds()) },
+    { name: "/project", about: "the saved project summary" },
+    { name: "/new", about: "start a fresh conversation" },
+    { name: "/reload", about: "restart with the latest code" },
+    { name: "/memories", about: "what Elena remembers" },
+    { name: "/forget", about: "delete a memory", args: (w) => (w.length ? [] : memory.list(root).map((m) => String(m.id))) },
+    { name: "/mac", about: "Mac health" },
+    { name: "/experts", about: "which cloud agents are ready" },
+    { name: "/pull", about: "download a model", args: (w) => (w.length ? [] : KNOWN_MODELS) },
+    { name: "/help", about: "all commands" },
+  ];
+  new Autosuggest(rl, () => commandSpecs, () => ui.isWaitingForInput).attach();
+  ui.statusSuffix = contextBar;
+
+  // After /reload: pick the same conversation back up, and skip the cheat sheet (you've seen it).
+  const resumeId = Number(process.env.ELENA_RESUME ?? "");
+  const reloaded = process.env.ELENA_RESUME !== undefined;
+  delete process.env.ELENA_RESUME;
+  const resumed = resumeId ? memory.listConversations(root, 200).find((c) => c.id === resumeId) : undefined;
+  if (resumed) loadConversation(resumed, true);
+  else if (reloaded) ui.notify("↺ Reloaded with the latest code.", "ok");
+  else console.log("\n" + cheatSheet());
+  if (!resumed) warmUp("Starting up");
+
+  // Tell the user when Elena's own code changes on disk (an update or a rebuild), so they can /reload.
+  let codeChangeNoticed = false;
+  let codeChangeTimer: NodeJS.Timeout | undefined;
+  try {
+    watch(path.dirname(fileURLToPath(import.meta.url)), { recursive: true }, (_event, file) => {
+      if (codeChangeNoticed || !String(file ?? "").endsWith(".js")) return;
+      clearTimeout(codeChangeTimer);
+      codeChangeTimer = setTimeout(() => {
+        codeChangeNoticed = true;
+        ui.notify("Elena's code was updated. /reload to use it; this conversation carries over.");
+      }, 1500);
+    }).unref();
+  } catch {
+    // watching isn't available here; /reload still works
+  }
   // Build Elena.app (once) so notifications show her icon. Quiet unless it actually builds.
   if (isMac && config.notify)
     ensureNotifier()
@@ -918,7 +1104,7 @@ async function main() {
   while (true) {
     let input: string;
     try {
-      input = (await ui.ask(chalk.cyan("you › "))).trim();
+      input = (await ui.ask(`${contextBar()} ${chalk.cyan("you ›")} `)).trim();
     } catch {
       break; // Ctrl+D / closed stdin
     }

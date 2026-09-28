@@ -121,11 +121,18 @@ elena ~/Projects/Transport-For-Ghana
 | `/tasks`, `/result <n>`, `/cancel <n>` | Background tasks, a finished task's report, stop one |
 | `/resume` | Recent conversations in this project; `/resume <n>` or `/resume last` continues one |
 | `/new` | Start a fresh conversation |
+| `/context` | What's filling the context window, by part |
+| `/compact` | Trim old tool output and summarise older messages |
+| `/reload` | Restart with the latest code, keeping the conversation |
 | `/mac` | Mac health |
 | `/memories`, `/forget <id>` | See and delete memories |
 | `exit` | Quit. Stops any processes Elena started. |
 
 Background events (scan progress, a server coming up, a crash) are printed above the prompt without losing what you're typing.
+
+Type `/` to see every command with a short description; keep typing to narrow the list. The first match is shown in grey after the cursor, and → or Tab takes it. Arguments complete too: `/model ` lists your models, `/logs ` and `/stop ` your processes, `/review ` offers claude and codex.
+
+The prompt always shows how full the context window is (`▰▰▱▱▱▱▱▱▱▱ 20% you ›`); the same bar is on the status line while Elena works, and `/context` has the breakdown.
 
 While Elena works, a status line says what she's doing and for how long (`⠹ Reading your message… 3s`, `⠼ Searching for “calculateFare”…`, `⠧ Thinking… 14s`). It clears when her answer starts, pauses for approval prompts, and is left out when output isn't a terminal.
 
@@ -214,6 +221,12 @@ Results on an M1 Pro (32 GB), qwen3:14b:
 What moved Elena from 39% to 94% was behaviour, not the model: a file list in her instructions; rules to look at the code before answering, to retry failed searches with looser patterns, to prefer source over tests, and to answer "how do I…" without running it; a `calculate` tool; a hint when a search finds nothing; and a nudge when she says "let me check…" without doing it.
 
 The remaining miss: asked what `calculateFare(0.5, 1)` returns, she computes 6.55 and skips the `minimum` clamp. Tracing every branch of code is a real limit of a 14B model. Claude is also far better on open-ended work (design, large refactors), which this suite doesn't measure; that's what `/claude` is for.
+
+## Context window and updates
+
+- **Live view:** every reply ends with a meter, e.g. `(4.2s · qwen3:14b · context ▰▰▰▱▱▱▱▱▱▱ 31% of 16k)`, green, then yellow past 60% and red past 80%. The count is Ollama's own (the full prompt, cached or not), estimated from the measured tokens-per-character between replies. `/context` breaks it down: instructions, tool definitions (the 24 tools alone are about 2.6k tokens), your messages, Elena's replies and tool results.
+- **Compaction:** at 75% full (`ELENA_COMPACT_AT`), Elena first shortens tool output older than the last two turns (she already used it), then, only if that isn't enough and there's enough old conversation for it to pay off, replaces the older messages with a short summary that keeps decisions, facts, paths, ports, errors, open tasks and your preferences. A summary that wouldn't be meaningfully shorter is discarded, and an earlier summary's facts are carried into the next one. `/compact` does it on demand. This matters: if a prompt overflows, Ollama silently drops its start, which is Elena's instructions. The saved conversation in `~/.elena/elena.db` keeps everything.
+- **Updates without losing your place:** when Elena's code changes on disk (after `elena update` or a rebuild), she says so; `/reload` restarts her in place with the new code and carries the conversation over. Running servers and background tasks are stopped, after asking.
 
 ## Conversations
 
