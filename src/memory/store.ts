@@ -42,6 +42,9 @@ export class MemoryStore {
   constructor(file: string) {
     if (file !== ":memory:") mkdirSync(path.dirname(file), { recursive: true });
     this.db = new DatabaseSync(file);
+    // Elena may be open in a terminal and running as Claude's MCP server at the same time:
+    // WAL lets them share the file, and the timeout waits out brief write locks instead of failing.
+    this.db.exec("PRAGMA journal_mode = WAL; PRAGMA busy_timeout = 5000;");
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS memories (
         id         INTEGER PRIMARY KEY,
@@ -157,7 +160,12 @@ export class MemoryStore {
 
   /** Case-insensitive search across every scope, so Elena can find notes from other projects. */
   search(query: string, limit = 20): Memory[] {
-    const words = query.trim().split(/\s+/).filter(Boolean);
+    // Match each word loosely: "ports" should find "port", "services" should find "service".
+    const words = query
+      .trim()
+      .split(/\s+/)
+      .filter(Boolean)
+      .map((w) => (w.length > 4 ? w.replace(/(es|s)$/i, "") : w));
     if (!words.length) return [];
     const where = words.map(() => "content LIKE ? ESCAPE '\\'").join(" AND ");
     const params = words.map((w) => `%${w.replace(/[\\%_]/g, (c) => "\\" + c)}%`);

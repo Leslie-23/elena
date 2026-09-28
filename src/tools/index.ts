@@ -4,7 +4,7 @@ import { gitDiffTool, gitLogTool, gitStatusTool } from "./git.js";
 import { portOwnerTool } from "./system.js";
 import { runCommandTool } from "./shell.js";
 import { forgetTool, recallTool, rememberTool } from "./memory.js";
-import { delegateTool } from "./agents.js";
+import { askExpertTool, delegateTool } from "./agents.js";
 import { clipboardTool, macControlTool, macOpenTool, macStatusTool } from "./mac.js";
 import { listProcessesTool, processLogsTool, scanProjectTool, startProcessTool, stopProcessTool } from "./processes.js";
 
@@ -23,6 +23,7 @@ export const tools: Tool[] = [
   stopProcessTool,
   scanProjectTool,
   delegateTool,
+  askExpertTool,
   macOpenTool,
   macStatusTool,
   macControlTool,

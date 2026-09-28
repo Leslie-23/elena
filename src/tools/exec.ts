@@ -1,4 +1,5 @@
 import { execFile, spawn } from "node:child_process";
+import { existsSync } from "node:fs";
 import { realpath } from "node:fs/promises";
 import path from "node:path";
 import { config } from "../config.js";
@@ -28,14 +29,17 @@ export function run(file: string, args: string[], cwd: string): Promise<ExecResu
   });
 }
 
+/** zsh on macOS; bash or sh on Linux machines that don't have it. */
+export const SHELL = ["/bin/zsh", "/bin/bash", "/bin/sh"].find((s) => existsSync(s)) ?? "/bin/sh";
+
 /**
- * Run a command line through zsh. Only for user-approved commands.
+ * Run a command line through the shell (zsh on macOS). Only for user-approved commands.
  * The command gets its own process group so a timeout kills everything it started,
  * not just the shell (otherwise `npm start` would leave node running).
  */
 export function runShell(command: string, cwd: string, timeoutMs: number): Promise<ExecResult & { timedOut: boolean }> {
   return new Promise((resolve) => {
-    const child = spawn("/bin/zsh", ["-c", command], { cwd, detached: true, stdio: ["ignore", "pipe", "pipe"] });
+    const child = spawn(SHELL, ["-c", command], { cwd, detached: true, stdio: ["ignore", "pipe", "pipe"] });
     const cap = 1024 * 1024;
     let stdout = "";
     let stderr = "";

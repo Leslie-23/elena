@@ -23,6 +23,8 @@ import { buildReview, estimateReadSeconds } from "./review.js";
 import { run } from "./tools/exec.js";
 import { UI } from "./ui.js";
 import { SubagentManager } from "./subagents.js";
+import { Escalation } from "./escalate.js";
+import { EXPERTS, EXPERT_LABELS, type ExpertName } from "./experts.js";
 import type { ToolContext } from "./tools/types.js";
 import { fitHistory, titleFrom } from "./conversations.js";
 import {
@@ -46,9 +48,15 @@ const HELP = `Commands:
   /ps                background processes Elena started
   /logs <name> [n]   last n lines from a process (default 40)
   /stop <name>       stop a process
+  /claude <task>     hand a heavy task to Claude Code (read-only, background)
+  /claude edit <t>   same, but it may edit files (asks first)
+  /codex <task>      same with Codex; /codex edit <task> to allow edits
+  /experts           which cloud agents are installed and signed in
+  /review claude     review uncommitted changes with Claude (or codex)
   /bg <task>         send a read-only subagent to investigate in the background
   /tasks             background tasks and their status
   /result <n>        read a background task's report
+  /cancel <n>        stop a running background task
   /resume            recent conversations in this project
   /resume <n>|last   pick up a conversation where you left off
   /new               start a fresh conversation
@@ -61,7 +69,9 @@ const HELP = `Commands:
 From your shell:
   elena [dir]          chat
   elena review [dir]   review uncommitted changes and exit
-  elena scan [dir]     scan the project, print the summary and exit`;
+  elena scan [dir]     scan the project, print the summary and exit
+  elena setup          check this machine and connect Elena to Claude Code / Codex
+  elena mcp [dir]      run as an MCP server (what Claude Code and Codex launch)`;
 
 // Exact phrases handled directly, without a model call. Anything else goes to Elena, who has tools for both.
 const SHORTCUTS: [RegExp, string][] = [
@@ -69,16 +79,12 @@ const SHORTCUTS: [RegExp, string][] = [
   [/^review( (my|the))?( (changes|diff|code))?[.!]?$/i, "/review"],
 ];
 
-function parseArgs(argv: string[]): {
-  mode: "chat" | "review" | "scan";
-  root: string;
-} {
-  const mode =
-    argv[0] === "review" || argv[0] === "scan" ? argv.shift()! : "chat";
-  return {
-    mode: mode as "chat" | "review" | "scan",
-    root: path.resolve(argv[0] ?? process.cwd()),
-  };
+type Mode = "chat" | "review" | "scan" | "mcp" | "setup";
+const MODES = ["review", "scan", "mcp", "setup"];
+
+function parseArgs(argv: string[]): { mode: Mode; root: string } {
+  const mode = MODES.includes(argv[0]) ? (argv.shift() as Mode) : "chat";
+  return { mode, root: path.resolve(argv[0] ?? process.cwd()) };
 }
 
 /** Short startup summary of commands and what Elena can do. /help has the full list. */
@@ -91,6 +97,8 @@ function cheatSheet(): string {
     ["/ps", "processes"],
     ["/logs <name>", "output"],
     ["/stop <name>", "stop one"],
+    ["/claude", "cloud agent"],
+    ["/codex", "cloud agent"],
     ["/bg <task>", "background"],
     ["/tasks", "bg tasks"],
     ["/result <n>", "bg report"],
@@ -118,6 +126,7 @@ function cheatSheet(): string {
     "git status/diff/log",
     "check ports",
     "subagents",
+    "Claude/Codex*",
     "run commands*",
     "start/stop servers*",
     "remember things",
@@ -133,7 +142,8 @@ function cheatSheet(): string {
     " ".repeat(10) +
       chalk.dim(tools.slice(4, 7).join(" · ") + "  ") +
       chalk.yellow("*asks first"),
-    " ".repeat(10) + chalk.dim(tools.slice(7).join(" · ")),
+    " ".repeat(10) + chalk.dim(tools.slice(7, 9).join(" · ")),
+    " ".repeat(10) + chalk.dim(tools.slice(9).join(" · ")),
   ].join("\n");
 }
 
@@ -178,6 +188,9 @@ async function main() {
     console.error(chalk.red(`Not a directory: ${root}`));
     process.exit(1);
   }
+  // These own stdin/stdout themselves, so they start before the chat UI is created.
+  if (mode === "mcp") return (await import("./mcp.js")).runMcpServer(root);
+  if (mode === "setup") return (await import("./setup.js")).runSetup();
 
   const ui = new UI();
 
@@ -280,6 +293,8 @@ async function main() {
           "ok",
         );
         void alert(`Elena: task #${t.id} done`, first);
+      } else if (t.status === "cancelled") {
+        ui.notify(`■ Background task #${t.id} cancelled.`);
       } else {
         ui.notify(`Background task #${t.id} failed: ${t.report}`, "error");
       }
@@ -287,6 +302,19 @@ async function main() {
   });
 
   toolCtx.subagents = subagents;
+
+  const escalation = new Escalation({
+    root,
+    tasks: subagents,
+    confirm,
+    onStep: (id, step) => {
+      const t = subagents.get(id);
+      ui.notify(`[#${id}] ${t ? EXPERT_LABELS[t.kind as ExpertName] ?? t.kind : "expert"} › ${step}`, "step");
+    },
+  });
+  toolCtx.escalation = escalation;
+  // Checking the CLIs takes about a second; don't hold up startup for it.
+  const expertsReady = escalation.refresh().catch(() => undefined);
 
   const agent = new Agent(
     new OllamaLLM(),
@@ -308,9 +336,10 @@ async function main() {
   async function shutdown(code = 0) {
     if (shuttingDown) return;
     shuttingDown = true;
-    const bgRunning = subagents.list().filter((t) => t.status === "running");
+    // Stop background work, so a cloud agent doesn't keep running (and using your quota) after Elena quits.
+    const bgRunning = subagents.cancelAll();
     if (bgRunning.length)
-      ui.notify(`Cancelling background task${bgRunning.length > 1 ? "s" : ""} ${bgRunning.map((t) => `#${t.id}`).join(", ")}.`);
+      ui.notify(`Cancelled background task${bgRunning.length > 1 ? "s" : ""} ${bgRunning.map((t) => `#${t.id}`).join(", ")}.`);
     const running = processes.running().map((p) => p.name);
     if (running.length) {
       ui.notify(`Stopping ${running.join(", ")}…`);
@@ -411,7 +440,7 @@ async function main() {
     }
   }
 
-  async function review() {
+  async function review(expert?: ExpertName) {
     ui.notify("🔎 Preparing a review of your uncommitted changes…");
     const input = await buildReview(root, (step) =>
       ui.notify(`· ${step}`, "step"),
@@ -421,10 +450,41 @@ async function main() {
     const skipped = input.skipped.length
       ? ` Left out for size: ${input.skipped.join(", ")}.`
       : "";
+    if (expert) {
+      // The cloud agent gets the same diff; it can read the rest of the project for context.
+      const res = await escalation.ask(input.prompt, { expert, mode: "read", background: true, userInitiated: true });
+      if (res.task) ui.notify(`🔎 ${EXPERT_LABELS[expert]} is reviewing ${input.files.length} file(s) as background task #${res.task.id}. Keep chatting.`);
+      else ui.notify(res.message, "error");
+      return;
+    }
     ui.notify(
       `Reviewing ${input.files.length} file${input.files.length === 1 ? "" : "s"} (~${tokensK}k tokens; about ${estimateReadSeconds(input.chars)}s to read${config.reviewThink ? ", then it thinks it through, usually under a minute" : ""}).${skipped}`,
     );
     await turn(input.prompt, "review");
+  }
+
+  /** `/claude [edit] <task>` and `/codex [edit] <task>`. */
+  async function expertCommand(expert: ExpertName, args: string[]) {
+    const edit = args[0] === "edit";
+    const task = (edit ? args.slice(1) : args).join(" ").trim();
+    if (!task) return ui.notify(`Usage: /${expert} <task>, or /${expert} edit <task> to let it change files`, "error");
+    await expertsReady;
+    const res = await escalation.ask(task, { expert, mode: edit ? "edit" : "read", background: true, userInitiated: true });
+    if (res.task)
+      ui.notify(
+        `☁ ${EXPERT_LABELS[expert]} is on it as background task #${res.task.id}${edit ? " (may edit files)" : " (read-only)"}. Keep chatting; I'll tell you when it's done.`,
+      );
+    else ui.notify(res.message, res.message.startsWith("User declined") ? "info" : "error");
+  }
+
+  async function showExperts() {
+    const a = await escalation.refresh();
+    for (const e of EXPERTS) {
+      const s = a[e];
+      const state = s.installed && s.loggedIn ? chalk.green("ready") : chalk.yellow(s.installed ? "not signed in" : "not installed");
+      console.log(`  ${EXPERT_LABELS[e].padEnd(12)} ${state}${s.version ? chalk.dim(`  v${s.version}`) : ""}${s.fix ? chalk.dim(`  → run: ${s.fix}`) : ""}`);
+    }
+    console.log(chalk.dim("  Read-only by default. Elena asks before sending anything herself; edit mode always asks."));
   }
 
   const pulling = new Set<string>();
@@ -598,8 +658,21 @@ async function main() {
         return true;
       }
       case "/review":
-        await review();
+        await review(rest[0] === "claude" || rest[0] === "codex" ? rest[0] : undefined);
         return true;
+      case "/claude":
+      case "/codex":
+        await expertCommand(cmd.slice(1) as ExpertName, rest);
+        return true;
+      case "/experts":
+        await showExperts();
+        return true;
+      case "/cancel": {
+        const t = subagents.get(Number(rest[0]));
+        if (!t || t.status !== "running") ui.notify(`No running task #${rest[0] ?? ""}. /tasks to list them.`, "error");
+        else if (!subagents.cancel(t.id)) ui.notify(`#${t.id} can't be cancelled; it will finish on its own.`);
+        return true;
+      }
       case "/model":
         await modelCommand(rest);
         return true;
@@ -665,8 +738,12 @@ async function main() {
                   ? chalk.cyan(`running ${secs(t.startedAt)}s`)
                   : t.status === "done"
                     ? chalk.green(`done in ${secs(t.startedAt, t.finishedAt)}s`)
-                    : chalk.red("failed");
-              return `  #${t.id}  ${state}  ${chalk.dim(`${t.steps} steps`)}  ${t.task}`;
+                    : t.status === "cancelled"
+                      ? chalk.dim("cancelled")
+                      : chalk.red("failed");
+              const who = t.kind === "subagent" ? `subagent (${t.model})` : t.model;
+              const task = t.task.length > 70 ? t.task.slice(0, 69) + "…" : t.task;
+              return `  #${t.id}  ${state}  ${chalk.dim(`${who} · ${t.steps} steps`)}  ${task}`;
             })
             .join("\n"),
         );
@@ -801,7 +878,14 @@ async function main() {
     if (reports.length)
       ui.notify(`↪ Giving Elena the report${reports.length > 1 ? "s" : ""} from ${reports.map((t) => `#${t.id}`).join(", ")}.`, "step");
     const withReports = reports.length
-      ? reports.map((t) => `[Background task #${t.id} (${t.task}) ${t.status === "done" ? "finished" : "failed"}. Report:]\n${t.report}`).join("\n\n") +
+      ? reports
+          .map((t) => {
+            const report = t.report ?? "";
+            const body = report.length > 4000 ? report.slice(0, 4000) + `\n… (truncated; the user can see all of it with /result ${t.id})` : report;
+            const task = t.task.length > 200 ? t.task.slice(0, 200) + "…" : t.task;
+            return `[Background task #${t.id} by ${t.model} (${task}) ${t.status === "done" ? "finished" : "failed"}. Report:]\n${body}`;
+          })
+          .join("\n\n") +
         `\n\n[My message:]\n${input}`
       : input;
     await turn(withReports, classify(input, lastTask));

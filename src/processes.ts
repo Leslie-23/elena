@@ -2,6 +2,7 @@ import { spawn, type ChildProcess } from "node:child_process";
 import { createWriteStream, mkdirSync, type WriteStream } from "node:fs";
 import net from "node:net";
 import path from "node:path";
+import { SHELL } from "./tools/exec.js";
 
 const MAX_LINES = 1000;
 const PORT_WAIT_MS = 90_000;
@@ -55,7 +56,7 @@ export class ProcessManager {
     const log = createWriteStream(logFile, { flags: "a" });
     log.write(`\n=== ${new Date().toISOString()} $ ${command}\n`);
 
-    const child = spawn("/bin/zsh", ["-c", command], {
+    const child = spawn(SHELL, ["-c", command], {
       cwd,
       detached: true,
       stdio: ["ignore", "pipe", "pipe"],

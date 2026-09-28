@@ -16,15 +16,19 @@ const REPORT_MAX_CHARS = 3000;
 
 export interface BackgroundTask {
   id: number;
+  /** A local subagent, or a cloud expert (Claude Code, Codex). */
+  kind: "subagent" | "claude" | "codex";
   task: string;
   model: string;
-  status: "running" | "done" | "failed";
+  status: "running" | "done" | "failed" | "cancelled";
   startedAt: number;
   finishedAt?: number;
   steps: number;
   report?: string;
   /** Whether the report has been handed to Elena yet. */
   delivered: boolean;
+  /** Stops the task, if it can be stopped. */
+  cancel?: () => void;
 }
 
 export interface SubagentDeps {
@@ -67,21 +71,31 @@ export class SubagentManager implements SubagentRunner {
 
   /** Start a background subagent. Returns an explanation instead if it can't start. */
   startBackground(task: string): BackgroundTask | string {
-    const running = this.tasks.filter((t) => t.status === "running").length;
+    // Only local subagents share the GPU with the main chat; cloud experts don't count.
+    const running = this.tasks.filter((t) => t.status === "running" && t.kind === "subagent").length;
     if (running >= config.maxBackgroundAgents) {
-      return `${running} background tasks are already running (the limit is ${config.maxBackgroundAgents}). Wait for one to finish.`;
+      return `${running} background subagents are already running (the limit is ${config.maxBackgroundAgents}). Wait for one to finish.`;
     }
     const model = this.deps.pickModel(task);
     if (!model) return "No model is available for a subagent.";
+    return this.track("subagent", task, model, (bg) => this.execute(task, bg));
+  }
 
-    const bg: BackgroundTask = { id: this.nextId++, task, model, status: "running", startedAt: Date.now(), steps: 0, delivered: false };
+  /**
+   * Run `work` as a background task: it shows up in /tasks, reports via onFinished,
+   * and its result is handed to Elena with the user's next message.
+   */
+  track(kind: BackgroundTask["kind"], task: string, model: string, work: (bg: BackgroundTask) => Promise<string>): BackgroundTask {
+    const bg: BackgroundTask = { id: this.nextId++, kind, task, model, status: "running", startedAt: Date.now(), steps: 0, delivered: false };
     this.tasks.push(bg);
-    this.execute(task, bg)
+    work(bg)
       .then((report) => {
+        if (bg.status === "cancelled") return;
         bg.status = "done";
         bg.report = report;
       })
       .catch((err) => {
+        if (bg.status === "cancelled") return;
         bg.status = "failed";
         bg.report = `Failed: ${err instanceof Error ? err.message : String(err)}`;
       })
@@ -99,6 +113,7 @@ export class SubagentManager implements SubagentRunner {
     const ctx: ToolContext = {
       ...this.deps.ctx,
       subagents: undefined, // no nesting
+      escalation: undefined,
       scan: undefined,
       notify: undefined,
       confirm: async () => false, // anything that would need approval is declined
@@ -117,6 +132,24 @@ export class SubagentManager implements SubagentRunner {
     // Thinking off: subagents are for fast digging; Elena does the reasoning over their report.
     const report = await agent.send(`Task: ${task}`, { model, think: false });
     return truncate(report.trim() || "(no findings)", REPORT_MAX_CHARS);
+  }
+
+  /** Stop a running task. Returns false if it isn't running or can't be stopped. */
+  cancel(id: number): boolean {
+    const t = this.get(id);
+    if (!t || t.status !== "running" || !t.cancel) return false;
+    t.status = "cancelled";
+    t.report = "Cancelled by the user.";
+    t.delivered = true; // nothing useful to hand to Elena
+    t.cancel();
+    return true;
+  }
+
+  /** Stop everything still running (on exit). */
+  cancelAll(): BackgroundTask[] {
+    const running = this.tasks.filter((t) => t.status === "running" && t.cancel);
+    for (const t of running) this.cancel(t.id);
+    return running;
   }
 
   list(): BackgroundTask[] {

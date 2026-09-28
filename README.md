@@ -2,6 +2,19 @@
 
 A local-first developer assistant. The LLM runs on your Mac through Ollama. Elena gives it a small set of typed, sandboxed tools.
 
+## Install on a new machine
+
+macOS or Linux, Node 22+:
+
+```bash
+git clone https://github.com/Leslie-23/elena.git && cd elena
+npm install    # also builds Elena
+npm link       # puts `elena` on your PATH
+elena setup    # checks Ollama, a model, ripgrep; connects Elena to Claude Code and Codex
+```
+
+`elena setup` only changes things you say yes to, and is safe to re-run. It suggests a model that fits your RAM (qwen3:14b at 24 GB+, qwen3:8b at 12 GB+, else qwen3:4b). Mac-only features (notifications, volume, `mac_open`) switch themselves off elsewhere.
+
 ## Setup
 
 ```bash
@@ -19,6 +32,8 @@ From your shell:
 elena [dir]          # chat
 elena review [dir]   # review uncommitted changes and exit
 elena scan [dir]     # scan the project, print the summary and exit
+elena setup          # check this machine; connect Elena to Claude Code / Codex
+elena mcp [dir]      # run as an MCP server (Claude Code and Codex launch this)
 ```
 
 Install `elena` as a global command:
@@ -58,6 +73,7 @@ elena ~/Projects/Transport-For-Ghana
 | `list_processes` / `process_logs` / `stop_process` | Manage what Elena started |
 | `scan_project` | Scan the project and refresh Elena's summary |
 | `delegate` | Hand an investigation to a read-only subagent, in the foreground or background |
+| `ask_expert` | Hand a heavy task to Claude Code or Codex (asks first) |
 | `mac_open` | Open an app ("vscode", "chrome"), a URL (`localhost:6969/docs`) or a project file/folder. External websites ask first. |
 | `mac_status` | Battery, disk, memory, CPU load, volume, uptime, front app |
 | `mac_control` | Volume, mute/unmute, screenshot to the Desktop, lock screen (asks first) |
@@ -79,8 +95,12 @@ elena ~/Projects/Transport-For-Ghana
 | `/ps` | Background processes Elena started |
 | `/logs <name> [n]` | Last n lines of a process's output |
 | `/stop <name>` | Stop a process |
+| `/claude <task>`, `/codex <task>` | Hand a heavy task to a cloud agent, read-only, in the background |
+| `/claude edit <task>`, `/codex edit <task>` | Same, but it may edit files (always asks first) |
+| `/review claude`, `/review codex` | Review uncommitted changes with a cloud agent |
+| `/experts` | Which cloud agents are installed and signed in |
 | `/bg <task>` | Send a subagent to investigate in the background; keep chatting |
-| `/tasks`, `/result <n>` | Background tasks, and a finished task's report |
+| `/tasks`, `/result <n>`, `/cancel <n>` | Background tasks, a finished task's report, stop one |
 | `/resume` | Recent conversations in this project; `/resume <n>` or `/resume last` continues one |
 | `/new` | Start a fresh conversation |
 | `/mac` | Mac health |
@@ -115,6 +135,43 @@ A subagent is a separate, short-lived Elena with its own context and **read-only
 - **Background:** `/bg <task>` (or Elena with `background: true`) runs it while you keep chatting. Its tool calls show as `[#1] → …` lines, you get a message (and a macOS notification if you're elsewhere) when it's done, `/result <n>` shows the report, and Elena gets it with your next message.
 - At most 2 run in the background at once. They share the GPU with the main chat; in testing a quick answer took 2.4s instead of ~0.5s while one was running.
 - Subagents can't start subagents.
+
+## Claude Code and Codex
+
+For work too big for a local model (large multi-file changes, hard debugging, deep reviews), Elena can hand the task to **Claude Code** (`claude -p`) or **Codex** (`codex exec`), if installed and signed in (`/experts` shows which, and what to run if not).
+
+- **You decide what leaves the Mac.** When Elena wants to escalate, she asks first, showing the service, the task and what it may do. Typing `/claude <task>` yourself counts as asking for read-only work; edit mode always asks.
+- **Read-only by default.** Claude gets only Read, Grep and Glob. Codex runs with `--sandbox read-only`.
+- **Edit mode:** Claude also gets Edit and Write, but never a shell. Codex uses `--sandbox workspace-write`: it may run commands, but can only write inside the project.
+- Runs in the background with live steps (`[#1] Claude Code › Read api/src/server.js`), a notification when done, and the report handed to Elena with your next message (up to 4,000 characters; `/result <n>` shows all of it).
+- `/cancel <n>` stops a run, and quitting Elena stops them all, so nothing keeps running on your quota. Runs time out after 15 minutes.
+- MCP servers and claude.ai connectors are switched off for these runs (`--strict-mcp-config`). In testing that cut a small question from ~$0.46 to ~$0.01 API-equivalent. On a Claude plan this is usage against your plan, not a charge.
+
+## Claude Code and Codex using Elena (MCP)
+
+The other direction: `elena mcp` runs Elena as an MCP server, so Claude Code, Codex or any MCP client can hand her work. `elena setup` registers her; to do it by hand:
+
+```bash
+claude mcp add --scope user elena -- "$(which node)" /path/to/elena/dist/index.js mcp
+codex mcp add elena -- "$(which node)" /path/to/elena/dist/index.js mcp
+```
+
+Absolute paths are used because agents don't always share your shell's PATH (nvm, for example).
+
+| Tool | For the calling agent |
+|---|---|
+| `elena_ask` | Hand Elena a small task to do locally with read-only tools. Free and private, but slower and weaker than Claude. Optional background mode. |
+| `elena_review` | A free second-opinion review of uncommitted changes by the local model (background by default) |
+| `elena_task` | Status and result of a background `elena_ask` / `elena_review` |
+| `elena_memory` | Recall, list or add the user's saved notes (shared with Elena in the terminal) |
+| `elena_project` | The project scan summary (saved, or `refresh: true`) |
+| `elena_process` | Start dev servers with port readiness, read logs, list, stop |
+| `elena_mac` | Mac status, open apps/URLs, and a notification to the user when the agent finishes |
+
+- The project is the client's workspace (from MCP roots, else the folder it launched Elena in), or `project_dir` on any call.
+- The client (e.g. Claude Code's permission prompt) approves each tool call. When Elena works through a whole task for the client (`elena_ask`, `elena_review`), nobody can approve her individual steps, so she only gets read-only tools.
+- Processes started this way stop when the client's session ends.
+- Elena in the terminal and Elena as an MCP server share `~/.elena/elena.db` safely (SQLite WAL mode).
 
 ## Conversations
 
@@ -175,7 +232,11 @@ src/
   models.ts         per-task model choice and task classifier
   conversations.ts  history trimming for /resume
   mac.ts            macOS status, notifications, volume, app names
-  subagents.ts      read-only subagents, foreground and background
+  subagents.ts      read-only subagents and the background task list
+  experts.ts        running Claude Code and Codex headless
+  escalate.ts       choosing an expert, approval, background tracking
+  mcp.ts            Elena as an MCP server for Claude Code, Codex and others
+  setup.ts          `elena setup`: machine checks and MCP registration
   processes.ts      background process manager
   project/scan.ts   project scanner
   agent.ts          agent loop (think → tool calls → repeat)
