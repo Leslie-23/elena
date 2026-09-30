@@ -6,6 +6,7 @@ import { existsSync, readFileSync, statSync, watch } from "node:fs";
 import { spawn, spawnSync } from "node:child_process";
 import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
+import { stripVTControlCharacters } from "node:util";
 import path from "node:path";
 import chalk from "chalk";
 import { Agent } from "./agent.js";
@@ -18,6 +19,7 @@ import {
   TASKS,
   TASK_LABELS,
   classify,
+  looksHeavy,
   normalize,
   type Task,
 } from "./models.js";
@@ -57,6 +59,7 @@ const HELP = `Commands:
   /stop <name>       stop a process
   /claude <task>     hand a heavy task to Claude Code (read-only, background)
   /claude edit <t>   same, but it may edit files (asks first)
+  /claude reply <m>  follow up in the latest Claude session (reply #n for task n's)
   /codex <task>      same with Codex; /codex edit <task> to allow edits
   /experts           which cloud agents are installed and signed in
   /review claude     review uncommitted changes with Claude (or codex)
@@ -101,25 +104,41 @@ const USAGE = `Usage:
 Inside Elena, type /help for commands.`;
 
 function version(): string {
-  return (createRequire(import.meta.url)("../package.json") as { version: string }).version;
+  return (
+    createRequire(import.meta.url)("../package.json") as { version: string }
+  ).version;
 }
 
 /** `elena update`: pull the latest code and rebuild, in the folder Elena runs from. */
 function runUpdate() {
-  const app = process.env.ELENA_APP_DIR ?? path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+  const app =
+    process.env.ELENA_APP_DIR ??
+    path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
   const step = (cmd: string, args: string[]) => {
     console.log(chalk.dim(`$ ${cmd} ${args.join(" ")}`));
     const r = spawnSync(cmd, args, { cwd: app, stdio: "inherit" });
     if (r.status !== 0) {
-      console.error(chalk.red(`\n${cmd} failed. Nothing else was changed; fix the above and run \`elena update\` again.`));
+      console.error(
+        chalk.red(
+          `\n${cmd} failed. Nothing else was changed; fix the above and run \`elena update\` again.`,
+        ),
+      );
       process.exit(r.status ?? 1);
     }
   };
   const before = version();
   step("git", ["pull", "--ff-only"]);
   step("npm", ["install", "--no-fund", "--no-audit", "--loglevel=error"]);
-  const after = (JSON.parse(readFileSync(path.join(app, "package.json"), "utf8")) as { version: string }).version;
-  console.log(chalk.green(`\n✓ Elena ${before === after ? `is up to date (${after})` : `updated ${before} → ${after}`}.`));
+  const after = (
+    JSON.parse(readFileSync(path.join(app, "package.json"), "utf8")) as {
+      version: string;
+    }
+  ).version;
+  console.log(
+    chalk.green(
+      `\n✓ Elena ${before === after ? `is up to date (${after})` : `updated ${before} → ${after}`}.`,
+    ),
+  );
 }
 
 type Mode = "chat" | "review" | "scan" | "mcp" | "setup";
@@ -220,7 +239,9 @@ function summarizeModels(router: ModelRouter): string {
     const picks = TASKS.map((t) => [t, router.pick(t)] as const);
     const auto = picks.every(([, p]) => p.why !== "pinned") ? " (auto)" : "";
     const unique = new Set(picks.map(([, p]) => p.model));
-    const better = picks.some(([, p]) => p.suggest) ? " · better ones available, /model" : "";
+    const better = picks.some(([, p]) => p.suggest)
+      ? " · better ones available, /model"
+      : "";
     if (unique.size === 1) return `Model: ${[...unique][0]}${auto}${better}`;
     return `Models: ${picks.map(([t, p]) => `${t} ${p.model}`).join(", ")}${better}`;
   } catch {
@@ -230,12 +251,15 @@ function summarizeModels(router: ModelRouter): string {
 
 async function main() {
   const first = process.argv[2];
-  if (first === "--help" || first === "-h" || first === "help") return console.log(banner([tagline]) + "\n\n" + USAGE);
+  if (first === "--help" || first === "-h" || first === "help")
+    return console.log(banner([tagline]) + "\n\n" + USAGE);
   if (first === "--version" || first === "-v") return console.log(version());
   if (first === "update") return runUpdate();
   const { mode, root } = parseArgs(process.argv.slice(2));
   if (!existsSync(root) || !statSync(root).isDirectory()) {
-    console.error(chalk.red(`Not a directory: ${root}`) + chalk.dim("\n\n" + USAGE));
+    console.error(
+      chalk.red(`Not a directory: ${root}`) + chalk.dim("\n\n" + USAGE),
+    );
     process.exit(1);
   }
   // These own stdin/stdout themselves, so they start before the chat UI is created.
@@ -256,7 +280,10 @@ async function main() {
     input: stdin,
     output: stdout,
     // Tab: complete the command (or its argument); a second Tab lists the options when there are several.
-    completer: (line: string): [string[], string] => [completions(line, commandSpecs), line],
+    completer: (line: string): [string[], string] => [
+      completions(line, commandSpecs),
+      line,
+    ],
   });
   ui.attach(rl);
 
@@ -269,13 +296,16 @@ async function main() {
     (msg, level) => {
       ui.notify(msg, level);
       // A server coming up or crashing is worth a ping if you've switched away.
-      if (level === "warn") void alert("Elena: process stopped", msg.split("\n")[0], "Basso");
+      if (level === "warn")
+        void alert("Elena: process stopped", msg.split("\n")[0], "Basso");
       else if (level === "ok") void alert("Elena", msg.split("\n")[0]);
     },
   );
   const confirm = async (q: string) => {
     void alert("Elena needs your OK", q.replace(/\s+/g, " ").trim(), "Glass");
-    const yes = /^y(es)?$/i.test((await ui.ask(chalk.yellow(`? ${q} [y/N] `))).trim());
+    const yes = /^y(es)?$/i.test(
+      (await ui.ask(chalk.yellow(`? ${q} [y/N] `))).trim(),
+    );
     ui.status(yes ? "Working on it" : "Carrying on"); // the status line paused for the question
     return yes;
   };
@@ -325,7 +355,8 @@ async function main() {
     scan: () => scan(false),
   };
 
-  const secs = (from: number, to = Date.now()) => ((to - from) / 1000).toFixed(0);
+  const secs = (from: number, to = Date.now()) =>
+    ((to - from) / 1000).toFixed(0);
   const subagents = new SubagentManager({
     llm: new OllamaLLM(),
     ctx: toolCtx,
@@ -346,7 +377,10 @@ async function main() {
       const first = (t.report ?? "").replace(/\s+/g, " ").trim().slice(0, 90);
       if (t.status === "done") {
         ui.notify(
-          `✓ Background task #${t.id} finished (${secs(t.startedAt, t.finishedAt)}s, ${t.steps} steps): ${first}…\n      /result ${t.id} to read it. Elena gets it with your next message.`,
+          `✓ Background task #${t.id} finished (${secs(t.startedAt, t.finishedAt)}s, ${t.steps} steps): ${first}…\n      /result ${t.id} to read it. Elena gets it with your next message.` +
+            (t.kind !== "subagent" && t.sessionId
+              ? `\n      Follow up: /${t.kind} reply <message> (or /${t.kind} reply #${t.id} …).`
+              : ""),
           "ok",
         );
         void alert(`Elena: task #${t.id} done`, first);
@@ -363,33 +397,34 @@ async function main() {
   const escalation = new Escalation({
     root,
     tasks: subagents,
+    memory,
     confirm,
     onStep: (id, step) => {
       const t = subagents.get(id);
-      ui.notify(`[#${id}] ${t ? EXPERT_LABELS[t.kind as ExpertName] ?? t.kind : "expert"} › ${step}`, "step");
+      ui.notify(
+        `[#${id}] ${t ? (EXPERT_LABELS[t.kind as ExpertName] ?? t.kind) : "expert"} › ${step}`,
+        "step",
+      );
     },
   });
   toolCtx.escalation = escalation;
+  toolCtx.slash = (line) => runAsElena(line);
   // Checking the CLIs takes about a second; don't hold up startup for it.
   const expertsReady = escalation.refresh().catch(() => undefined);
 
-  const agent = new Agent(
-    new OllamaLLM(),
-    toolCtx,
-    {
-      onToken: (t) => ui.token(t),
-      onThinking: () => ui.status("Thinking", "💭 thinking…"),
-      onMessage: (m) => {
-        conversationId ??= memory.startConversation(root, titleFrom(m.content));
-        memory.addMessage(conversationId, m);
-      },
-      onToolCall: (name, args) => ui.toolCall(name, args),
-      onToolResult: (_name, result) => {
-        if (config.debug) ui.notify(preview(result), "step");
-        ui.status("Reading the result"); // the model now processes the tool output
-      },
+  const agent = new Agent(new OllamaLLM(), toolCtx, {
+    onToken: (t) => ui.token(t),
+    onThinking: () => ui.status("Thinking", "💭 thinking…"),
+    onMessage: (m) => {
+      conversationId ??= memory.startConversation(root, titleFrom(m.content));
+      memory.addMessage(conversationId, m);
     },
-  );
+    onToolCall: (name, args) => ui.toolCall(name, args),
+    onToolResult: (_name, result) => {
+      if (config.debug) ui.notify(preview(result), "step");
+      ui.status("Reading the result"); // the model now processes the tool output
+    },
+  });
 
   let shuttingDown = false;
   async function shutdown(code = 0) {
@@ -398,7 +433,9 @@ async function main() {
     // Stop background work, so a cloud agent doesn't keep running (and using your quota) after Elena quits.
     const bgRunning = subagents.cancelAll();
     if (bgRunning.length)
-      ui.notify(`Cancelled background task${bgRunning.length > 1 ? "s" : ""} ${bgRunning.map((t) => `#${t.id}`).join(", ")}.`);
+      ui.notify(
+        `Cancelled background task${bgRunning.length > 1 ? "s" : ""} ${bgRunning.map((t) => `#${t.id}`).join(", ")}.`,
+      );
     const running = processes.running().map((p) => p.name);
     if (running.length) {
       ui.notify(`Stopping ${running.join(", ")}…`);
@@ -425,16 +462,23 @@ async function main() {
     }
     const canThink = router.info(model)?.thinking ?? false;
     const started = Date.now();
-    ui.notify(`⏳ ${reason}: ${model} is reading Elena's instructions in the background…`, "step");
+    ui.notify(
+      `⏳ ${reason}: ${model} is reading Elena's instructions in the background…`,
+      "step",
+    );
     agent
       .warmUp(model, canThink ? config.think : undefined)
       .then(() =>
-        ui.notify(`✓ Ready (${((Date.now() - started) / 1000).toFixed(1)}s).`, "ok"),
+        ui.notify(
+          `✓ Ready (${((Date.now() - started) / 1000).toFixed(1)}s).`,
+          "ok",
+        ),
       )
       .catch(() => {}); // not fatal; the first reply is just slower
   }
 
   let lastModel: string | undefined;
+  let lastAnswer = "";
   let lastTask: Task | undefined;
   const hinted = new Set<string>();
 
@@ -465,25 +509,34 @@ async function main() {
     return pick.model;
   }
 
-  async function turn(input: string, task: Task) {
+  async function turn(input: string, task: Task): Promise<string | undefined> {
     const model = chooseModel(task);
-    if (!model) return;
+    if (!model) return undefined;
     lastTask = task;
     // Only send `think` to models that support it; Ollama rejects it otherwise.
     const canThink = router.info(model)?.thinking ?? false;
     const wantThink = task === "review" ? config.reviewThink : config.think;
     const started = Date.now();
     try {
-      ui.status(task === "review" ? "Reading the changes" : "Reading your message");
+      ui.status(
+        task === "review" ? "Reading the changes" : "Reading your message",
+      );
       const answer = await agent.send(input, {
         model,
         think: canThink ? wantThink : undefined,
       });
       const seconds = (Date.now() - started) / 1000;
       ui.finishTurn(answer, seconds, model);
-      await autoCompact(model);
+      lastAnswer = answer;
+      if (compactAfterTurn) {
+        compactAfterTurn = false;
+        await compact(model, "Compacted (Elena asked to)");
+      } else await autoCompact(model);
       if (seconds > config.notifyAfterSeconds)
-        void alert(task === "review" ? "Elena: review ready" : "Elena answered", answer.replace(/\s+/g, " ").trim());
+        void alert(
+          task === "review" ? "Elena: review ready" : "Elena answered",
+          answer.replace(/\s+/g, " ").trim(),
+        );
     } catch (err) {
       ui.stopStatus();
       ui.endLine();
@@ -514,8 +567,16 @@ async function main() {
       : "";
     if (expert) {
       // The cloud agent gets the same diff; it can read the rest of the project for context.
-      const res = await escalation.ask(input.prompt, { expert, mode: "read", background: true, userInitiated: true });
-      if (res.task) ui.notify(`🔎 ${EXPERT_LABELS[expert]} is reviewing ${input.files.length} file(s) as background task #${res.task.id}. Keep chatting.`);
+      const res = await escalation.ask(input.prompt, {
+        expert,
+        mode: "read",
+        background: true,
+        userInitiated: !elenaInvoking,
+      });
+      if (res.task)
+        ui.notify(
+          `🔎 ${EXPERT_LABELS[expert]} is reviewing ${input.files.length} file(s) as background task #${res.task.id}. Keep chatting.`,
+        );
       else ui.notify(res.message, "error");
       return;
     }
@@ -526,33 +587,111 @@ async function main() {
   }
 
   /** `/claude [edit] <task>` and `/codex [edit] <task>`. */
+  /**
+   * /claude [edit] <task>            start a new session
+   * /claude [edit] reply [#n] <msg>  follow up in the latest session (or background task #n's session)
+   * A follow-up keeps its session's mode unless you add "edit".
+   */
   async function expertCommand(expert: ExpertName, args: string[]) {
-    const edit = args[0] === "edit";
-    const task = (edit ? args.slice(1) : args).join(" ").trim();
-    if (!task) return ui.notify(`Usage: /${expert} <task>, or /${expert} edit <task> to let it change files`, "error");
+    const words = [...args];
+    let edit = false;
+    let reply = false;
+    while (words[0] === "edit" || words[0] === "reply") {
+      if (words.shift() === "edit") edit = true;
+      else reply = true;
+    }
+    let resume: string | undefined;
+    let mode: "read" | "edit" = edit ? "edit" : "read";
+    if (reply) {
+      const target = words[0]?.match(/^#(\d+)$/);
+      if (target) {
+        words.shift();
+        const t = subagents.get(Number(target[1]));
+        if (!t?.sessionId || t.kind !== expert)
+          return ui.notify(
+            `Task #${target[1]} isn't a ${EXPERT_LABELS[expert]} session. /tasks to see them.`,
+            "error",
+          );
+        resume = t.sessionId;
+        if (!edit) mode = t.mode ?? "read";
+      } else {
+        const last = memory.listExpertSessions(root, expert, 1)[0];
+        if (!last)
+          return ui.notify(
+            `No earlier ${EXPERT_LABELS[expert]} session in this project. /${expert} <task> starts one.`,
+            "error",
+          );
+        resume = last.session_id;
+        if (!edit) mode = last.mode;
+      }
+    }
+    const task = words.join(" ").trim();
+    if (!task) {
+      return ui.notify(
+        reply
+          ? `Usage: /${expert} reply <message>, or /${expert} reply #<task> <message>`
+          : `Usage: /${expert} <task>, /${expert} edit <task>, or /${expert} reply <message>`,
+        "error",
+      );
+    }
     await expertsReady;
-    const res = await escalation.ask(task, { expert, mode: edit ? "edit" : "read", background: true, userInitiated: true });
+    const res = await escalation.ask(task, {
+      expert,
+      mode,
+      background: true,
+      userInitiated: !elenaInvoking,
+      resume,
+    });
     if (res.task)
       ui.notify(
-        `☁ ${EXPERT_LABELS[expert]} is on it as background task #${res.task.id}${edit ? " (may edit files)" : " (read-only)"}. Keep chatting; I'll tell you when it's done.`,
+        `☁ ${EXPERT_LABELS[expert]} is on it as background task #${res.task.id}${resume ? " (follow-up in the same session)" : ""}${mode === "edit" ? " (may edit files)" : " (read-only)"}. Keep chatting; I'll tell you when it's done.`,
       );
-    else ui.notify(res.message, res.message.startsWith("User declined") ? "info" : "error");
+    else
+      ui.notify(
+        res.message,
+        res.message.startsWith("User declined") ? "info" : "error",
+      );
   }
 
   async function showExperts() {
     const a = await escalation.refresh();
     for (const e of EXPERTS) {
       const s = a[e];
-      const state = s.installed && s.loggedIn ? chalk.green("ready") : chalk.yellow(s.installed ? "not signed in" : "not installed");
-      console.log(`  ${EXPERT_LABELS[e].padEnd(12)} ${state}${s.version ? chalk.dim(`  v${s.version}`) : ""}${s.fix ? chalk.dim(`  → run: ${s.fix}`) : ""}`);
+      const state =
+        s.installed && s.loggedIn
+          ? chalk.green("ready")
+          : chalk.yellow(s.installed ? "not signed in" : "not installed");
+      console.log(
+        `  ${EXPERT_LABELS[e].padEnd(12)} ${state}${s.version ? chalk.dim(`  v${s.version}`) : ""}${s.fix ? chalk.dim(`  → run: ${s.fix}`) : ""}`,
+      );
     }
-    console.log(chalk.dim("  Read-only by default. Elena asks before sending anything herself; edit mode always asks."));
+    console.log(
+      chalk.dim(
+        "  Read-only by default. Elena asks before sending anything herself; edit mode always asks.",
+      ),
+    );
+    const sessions = memory.listExpertSessions(root);
+    if (sessions.length) {
+      console.log(chalk.bold("\n  Recent sessions in this project"));
+      for (const s of sessions) {
+        const task = s.task.replace(/\s+/g, " ");
+        console.log(
+          `    ${chalk.cyan(s.session_id.slice(0, 8))}  ${EXPERT_LABELS[s.expert as ExpertName] ?? s.expert}  ${chalk.dim(`${s.turns} turn${s.turns === 1 ? "" : "s"} · ${ago(s.updated_at)}`)}  ${task.length > 50 ? task.slice(0, 49) + "…" : task}`,
+        );
+      }
+      console.log(
+        chalk.dim(
+          `  /claude reply <message> continues the latest; claude --resume <id> opens one in Claude Code.`,
+        ),
+      );
+    }
   }
 
   const pulling = new Set<string>();
   /** Download a model in the background, reporting progress every 10%. */
-  function pull(name: string) {
+  async function pull(name: string) {
     const model = normalize(name);
+    if (elenaInvoking && !(await confirm(`Elena wants to download ${model}. Allow?`))) return ui.notify("Download cancelled.");
     if (pulling.has(model)) return ui.notify(`Already downloading ${model}.`);
     if (router.info(model)) return ui.notify(`${model} is already installed.`);
     pulling.add(model);
@@ -580,8 +719,7 @@ async function main() {
           `✓ ${model} downloaded, but it doesn't support tool calling, so Elena can't use it.`,
           "warn",
         );
-      else
-      {
+      else {
         ui.notify(
           `✓ ${model} is ready. Elena will use it where it fits best; /model to see.`,
           "ok",
@@ -605,7 +743,9 @@ async function main() {
     const lines = [chalk.bold("  Installed")];
     for (const m of router.list()) {
       const caps = m.tools
-        ? chalk.dim(["tools", m.thinking && "thinking"].filter(Boolean).join(" · "))
+        ? chalk.dim(
+            ["tools", m.thinking && "thinking"].filter(Boolean).join(" · "),
+          )
         : chalk.yellow("no tool support, Elena can't use it");
       lines.push(`    ${m.name.padEnd(22)}${gb(m.sizeGB)} GB  ${caps}`);
     }
@@ -614,7 +754,8 @@ async function main() {
     for (const t of TASKS) {
       try {
         const p = router.pick(t);
-        const how = p.why === "pinned" ? chalk.cyan("pinned") : chalk.dim("auto  ");
+        const how =
+          p.why === "pinned" ? chalk.cyan("pinned") : chalk.dim("auto  ");
         lines.push(
           `    ${t.padEnd(8)}${p.model.padEnd(22)}${how}  ${chalk.dim(TASK_LABELS[t])}`,
         );
@@ -625,13 +766,21 @@ async function main() {
             ),
           );
       } catch (err) {
-        lines.push(`    ${t.padEnd(8)}${chalk.red(err instanceof Error ? err.message : String(err))}`);
+        lines.push(
+          `    ${t.padEnd(8)}${chalk.red(err instanceof Error ? err.message : String(err))}`,
+        );
       }
     }
     if (router.envPinned)
-      lines.push(chalk.yellow(`  ELENA_MODEL is set, so every task uses ${config.model}.`));
+      lines.push(
+        chalk.yellow(
+          `  ELENA_MODEL is set, so every task uses ${config.model}.`,
+        ),
+      );
     lines.push(
-      chalk.dim("  /model <name> · /model <task> <name> · /model auto · /pull <name>"),
+      chalk.dim(
+        "  /model <name> · /model <task> <name> · /model auto · /pull <name>",
+      ),
     );
     console.log(lines.join("\n"));
   }
@@ -641,25 +790,43 @@ async function main() {
     if (ollamaUp) await router.refresh().catch(() => {});
     if (!args.length) return showModels();
 
-    const task = (TASKS as string[]).includes(args[0]) ? (args.shift() as Task) : "all";
+    const task = (TASKS as string[]).includes(args[0])
+      ? (args.shift() as Task)
+      : "all";
     const name = args[0];
     const target = task === "all" ? "every task" : task;
-    if (!name) return ui.notify(`Usage: /model ${task === "all" ? "<name>" : `${task} <name|auto>`}`, "error");
+    if (!name)
+      return ui.notify(
+        `Usage: /model ${task === "all" ? "<name>" : `${task} <name|auto>`}`,
+        "error",
+      );
 
     if (name === "auto") {
       router.pin(task, null);
-      ui.notify(`Elena picks the model for ${target} automatically again.`, "ok");
+      ui.notify(
+        `Elena picks the model for ${target} automatically again.`,
+        "ok",
+      );
     } else {
       const info = router.info(name);
       if (!info)
-        return ui.notify(`${normalize(name)} isn't installed. /pull ${normalize(name)} to download it.`, "error");
+        return ui.notify(
+          `${normalize(name)} isn't installed. /pull ${normalize(name)} to download it.`,
+          "error",
+        );
       if (!info.tools)
-        return ui.notify(`${info.name} doesn't support tool calling, which Elena needs.`, "error");
+        return ui.notify(
+          `${info.name} doesn't support tool calling, which Elena needs.`,
+          "error",
+        );
       router.pin(task, info.name);
       ui.notify(`Using ${info.name} for ${target}. /model auto to undo.`, "ok");
     }
     if (router.envPinned)
-      ui.notify(`Note: ELENA_MODEL is set, so it overrides this until you unset it.`, "warn");
+      ui.notify(
+        `Note: ELENA_MODEL is set, so it overrides this until you unset it.`,
+        "warn",
+      );
   }
 
   /** `/resume` lists conversations; `/resume <n>` or `/resume last` loads one. */
@@ -668,29 +835,48 @@ async function main() {
     const { used, limit } = agent.contextUsage();
     const pct = Math.min(100, Math.round((used / limit) * 100));
     const filled = Math.min(10, Math.round(pct / 10));
-    const color = pct >= 80 ? chalk.red : pct >= 60 ? chalk.yellow : chalk.green;
-    return chalk.dim("context ") + color("▰".repeat(filled)) + chalk.dim("▱".repeat(10 - filled)) + chalk.dim(` ${pct}% of ${Math.round(limit / 1000)}k`);
+    const color =
+      pct >= 80 ? chalk.red : pct >= 60 ? chalk.yellow : chalk.green;
+    return (
+      chalk.dim("context ") +
+      color("▰".repeat(filled)) +
+      chalk.dim("▱".repeat(10 - filled)) +
+      chalk.dim(` ${pct}% of ${Math.round(limit / 1000)}k`)
+    );
   }
 
-  const fmtK = (n: number) => (n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n));
+  const fmtK = (n: number) =>
+    n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n);
 
   /** The short version, always shown in the prompt: "▰▰▱▱▱▱▱▱▱▱ 20%". */
   function contextBar(): string {
     const { used, limit } = agent.contextUsage();
     const pct = Math.min(100, Math.round((used / limit) * 100));
     const filled = Math.min(10, Math.round(pct / 10));
-    const color = pct >= 80 ? chalk.red : pct >= 60 ? chalk.yellow : chalk.green;
-    return color("▰".repeat(filled)) + chalk.dim("▱".repeat(10 - filled) + ` ${pct}%`);
+    const color =
+      pct >= 80 ? chalk.red : pct >= 60 ? chalk.yellow : chalk.green;
+    return (
+      color("▰".repeat(filled)) +
+      chalk.dim("▱".repeat(10 - filled) + ` ${pct}%`)
+    );
   }
 
   function showContext() {
     const { used, limit, exact } = agent.contextUsage();
-    console.log(`  ${contextMeter()}  ${chalk.dim(`(${fmtK(used)} tokens${exact ? "" : ", estimated"})`)}`);
+    console.log(
+      `  ${contextMeter()}  ${chalk.dim(`(${fmtK(used)} tokens${exact ? "" : ", estimated"})`)}`,
+    );
     for (const part of agent.contextBreakdown()) {
       const pct = Math.round((part.tokens / limit) * 100);
-      console.log(`    ${fmtK(part.tokens).padStart(6)}  ${chalk.dim(`${String(pct).padStart(2)}%`)}  ${part.label}`);
+      console.log(
+        `    ${fmtK(part.tokens).padStart(6)}  ${chalk.dim(`${String(pct).padStart(2)}%`)}  ${part.label}`,
+      );
     }
-    console.log(chalk.dim(`  Elena compacts automatically at ${Math.round(config.compactAt * 100)}%. /compact to do it now, /new to start fresh.`));
+    console.log(
+      chalk.dim(
+        `  Elena compacts automatically at ${Math.round(config.compactAt * 100)}%. /compact to do it now, /new to start fresh.`,
+      ),
+    );
   }
 
   /** Trim old tool output, then summarise older messages if that wasn't enough. */
@@ -704,14 +890,31 @@ async function main() {
         summarized = await agent.summarizeHistory(model);
       } catch (err) {
         ui.stopStatus();
-        ui.notify(`Couldn't summarise: ${err instanceof Error ? err.message : String(err)}`, "error");
+        ui.notify(
+          `Couldn't summarise: ${err instanceof Error ? err.message : String(err)}`,
+          "error",
+        );
       }
     }
     ui.stopStatus();
     const after = agent.contextUsage().used;
-    if (!trimmed && !summarized) return quiet ? undefined : ui.notify("Nothing to compact yet: the conversation is all recent or already short.");
-    const what = [trimmed && `trimmed ${trimmed} old tool result${trimmed === 1 ? "" : "s"}`, summarized && "summarised older messages"].filter(Boolean).join(" and ");
-    ui.notify(`🗜 ${reason}: ${what}. Context ${fmtK(before)} → ${fmtK(after)} tokens (${Math.round((after / config.numCtx) * 100)}%).`, "ok");
+    if (!trimmed && !summarized)
+      return quiet
+        ? undefined
+        : ui.notify(
+            "Nothing to compact yet: the conversation is all recent or already short.",
+          );
+    const what = [
+      trimmed &&
+        `trimmed ${trimmed} old tool result${trimmed === 1 ? "" : "s"}`,
+      summarized && "summarised older messages",
+    ]
+      .filter(Boolean)
+      .join(" and ");
+    ui.notify(
+      `🗜 ${reason}: ${what}. Context ${fmtK(before)} → ${fmtK(after)} tokens (${Math.round((after / config.numCtx) * 100)}%).`,
+      "ok",
+    );
   }
 
   /**
@@ -720,40 +923,62 @@ async function main() {
    */
   async function reload() {
     const running = processes.running().map((p) => p.name);
-    const tasks = subagents.list().filter((t) => t.status === "running").map((t) => `task #${t.id}`);
+    const tasks = subagents
+      .list()
+      .filter((t) => t.status === "running")
+      .map((t) => `task #${t.id}`);
     if (running.length || tasks.length) {
-      const ok = await confirm(`Reloading stops ${[...running, ...tasks].join(", ")}. Continue?`);
+      const ok = await confirm(
+        `Reloading stops ${[...running, ...tasks].join(", ")}. Continue?`,
+      );
       ui.stopStatus();
       if (!ok) return;
     }
     ui.notify("↻ Reloading Elena with her latest code…");
     subagents.cancelAll();
     await processes.stopAll();
-    const env = { ...process.env, ELENA_RESUME: conversationId ? String(conversationId) : "0" };
+    const env = {
+      ...process.env,
+      ELENA_RESUME: conversationId ? String(conversationId) : "0",
+    };
     const argv = [process.execPath, process.argv[1], ...process.argv.slice(2)];
     rl.close();
     memory.close();
-    const execve = (process as unknown as { execve?: (file: string, args: string[], env: NodeJS.ProcessEnv) => never }).execve;
+    const execve = (
+      process as unknown as {
+        execve?: (
+          file: string,
+          args: string[],
+          env: NodeJS.ProcessEnv,
+        ) => never;
+      }
+    ).execve;
     if (execve) execve(process.execPath, argv, env);
     // Node < 22.15: run the new version as a child that takes over the terminal, and exit with it.
     process.removeAllListeners("SIGINT");
     process.on("SIGINT", () => {}); // Ctrl+C belongs to the new Elena now
-    spawn(process.execPath, argv.slice(1), { stdio: "inherit", env }).on("exit", (code) => process.exit(code ?? 0));
+    spawn(process.execPath, argv.slice(1), { stdio: "inherit", env }).on(
+      "exit",
+      (code) => process.exit(code ?? 0),
+    );
     await new Promise(() => {}); // wait here until the child exits
   }
 
   async function autoCompact(model: string) {
-    if (agent.contextUsage().used / config.numCtx >= config.compactAt) await compact(model, "Context was getting full", true);
+    if (agent.contextUsage().used / config.numCtx >= config.compactAt)
+      await compact(model, "Context was getting full", true);
   }
 
   function resumeCommand(arg?: string) {
     const past = memory.listConversations(root, 10);
     if (!arg) {
-      if (!past.length) return ui.notify("No saved conversations in this project yet.");
+      if (!past.length)
+        return ui.notify("No saved conversations in this project yet.");
       console.log(
         past
           .map((c, i) => {
-            const current = c.id === conversationId ? chalk.cyan("  (current)") : "";
+            const current =
+              c.id === conversationId ? chalk.cyan("  (current)") : "";
             return `  ${String(i + 1).padStart(2)}. ${chalk.dim(ago(c.updated_at).padEnd(11))} ${c.title}  ${chalk.dim(`${c.turns} turn${c.turns === 1 ? "" : "s"}`)}${current}`;
           })
           .join("\n") + chalk.dim("\n  /resume <n> to continue one"),
@@ -762,12 +987,22 @@ async function main() {
     }
     const others = past.filter((c) => c.id !== conversationId);
     const pick = arg === "last" ? others[0] : past[Number(arg) - 1];
-    if (!pick) return ui.notify(arg === "last" ? "No earlier conversation to resume." : `No conversation #${arg}. /resume to list them.`, "error");
-    if (pick.id === conversationId) return ui.notify("That's the conversation you're in.");
+    if (!pick)
+      return ui.notify(
+        arg === "last"
+          ? "No earlier conversation to resume."
+          : `No conversation #${arg}. /resume to list them.`,
+        "error",
+      );
+    if (pick.id === conversationId)
+      return ui.notify("That's the conversation you're in.");
     loadConversation(pick, false);
   }
 
-  function loadConversation(pick: { id: number; title: string; turns: number; updated_at: string }, afterReload: boolean) {
+  function loadConversation(
+    pick: { id: number; title: string; turns: number; updated_at: string },
+    afterReload: boolean,
+  ) {
     const { kept, dropped } = fitHistory(memory.getMessages(pick.id));
     agent.loadHistory(kept);
     conversationId = pick.id;
@@ -779,18 +1014,76 @@ async function main() {
       "ok",
     );
     if (dropped)
-      ui.notify(`Loaded the latest ${kept.length} messages; the ${dropped} before them are too long to fit in the model's context.`, "step");
+      ui.notify(
+        `Loaded the latest ${kept.length} messages; the ${dropped} before them are too long to fit in the model's context.`,
+        "step",
+      );
 
     // Remind the user where they left off.
     const lastUser = [...kept].reverse().find((m) => m.role === "user");
-    const lastAnswer = [...kept].reverse().find((m) => m.role === "assistant" && m.content.trim());
+    const lastAnswer = [...kept]
+      .reverse()
+      .find((m) => m.role === "assistant" && m.content.trim());
     const clip = (t: string, n: number) => {
       const one = t.replace(/\s+/g, " ").trim();
       return one.length > n ? one.slice(0, n) + "…" : one;
     };
-    if (lastUser) console.log(chalk.dim(`  you › ${clip(lastUser.content, 120)}`));
-    if (lastAnswer) console.log(chalk.dim(`  elena › ${clip(lastAnswer.content, 300)}`));
+    if (lastUser)
+      console.log(chalk.dim(`  lesliePaul › ${clip(lastUser.content, 120)}`));
+    if (lastAnswer)
+      console.log(chalk.dim(`  elena › ${clip(lastAnswer.content, 300)}`));
     warmUp("Resumed conversation");
+  }
+
+  /** True while Elena herself is running a slash command, so approvals still apply. */
+  let elenaInvoking = false;
+  /** escalation.declines at the start of this turn: after a "no", Elena can't ask again in the same turn. */
+  let turnDeclines = 0;
+  let compactAfterTurn = false;
+  /**
+   * Commands Elena may run herself. Not /reload, /new, /resume or /forget, and not a local /review
+   * (it would start a second reply inside her current one); /compact waits until her reply is done.
+   */
+  const ELENA_COMMANDS = new Set([
+    "/claude", "/codex", "/experts", "/bg", "/tasks", "/result", "/cancel", "/scan", "/project",
+    "/context", "/compact", "/ps", "/logs", "/stop", "/pull", "/model", "/mac", "/memories", "/review",
+  ]);
+
+  /** Run a slash command for Elena and return what it printed, as plain text for her to read. */
+  async function runAsElena(line: string): Promise<string> {
+    const cmd = line.trim().split(/\s+/)[0];
+    if (!cmd.startsWith("/")) return `Not a slash command: ${line}`;
+    if (!ELENA_COMMANDS.has(cmd)) return `${cmd} is only for the user to run. Suggest it to them instead.`;
+    if ((cmd === "/claude" || cmd === "/codex") && escalation.declines > turnDeclines) {
+      return "The user already said no to handing this off. Don't ask again; answer them directly.";
+    }
+    if (cmd === "/review" && !/^\/review\s+(claude|codex)\b/.test(line.trim())) {
+      return "Run /review claude (or codex) for a cloud review. For a local review, read the diff yourself with git_diff.";
+    }
+    if (cmd === "/compact") {
+      compactAfterTurn = true;
+      return "Will compact the conversation as soon as this reply is finished.";
+    }
+    const lines: string[] = [];
+    const log = console.log;
+    const notify = ui.notify.bind(ui);
+    console.log = (...a: unknown[]) => {
+      lines.push(a.map(String).join(" "));
+      log(...a);
+    };
+    ui.notify = (m: string, level?: Parameters<UI["notify"]>[1]) => {
+      lines.push(m);
+      notify(m, level);
+    };
+    elenaInvoking = true;
+    try {
+      await command(line.trim());
+    } finally {
+      elenaInvoking = false;
+      console.log = log;
+      ui.notify = notify;
+    }
+    return stripVTControlCharacters(lines.join("\n")).trim() || "(done)";
   }
 
   /** Returns false if `input` isn't a command. */
@@ -811,7 +1104,9 @@ async function main() {
         return true;
       }
       case "/review":
-        await review(rest[0] === "claude" || rest[0] === "codex" ? rest[0] : undefined);
+        await review(
+          rest[0] === "claude" || rest[0] === "codex" ? rest[0] : undefined,
+        );
         return true;
       case "/claude":
       case "/codex":
@@ -822,16 +1117,22 @@ async function main() {
         return true;
       case "/cancel": {
         const t = subagents.get(Number(rest[0]));
-        if (!t || t.status !== "running") ui.notify(`No running task #${rest[0] ?? ""}. /tasks to list them.`, "error");
-        else if (!subagents.cancel(t.id)) ui.notify(`#${t.id} can't be cancelled; it will finish on its own.`);
+        if (!t || t.status !== "running")
+          ui.notify(
+            `No running task #${rest[0] ?? ""}. /tasks to list them.`,
+            "error",
+          );
+        else if (!subagents.cancel(t.id))
+          ui.notify(`#${t.id} can't be cancelled; it will finish on its own.`);
         return true;
       }
       case "/model":
         await modelCommand(rest);
         return true;
       case "/pull":
-        if (!rest[0]) ui.notify("Usage: /pull <model>, e.g. /pull qwen3:8b", "error");
-        else pull(rest[0]);
+        if (!rest[0])
+          ui.notify("Usage: /pull <model>, e.g. /pull qwen3:8b", "error");
+        else await pull(rest[0]);
         return true;
       case "/ps": {
         const all = processes.list();
@@ -866,7 +1167,10 @@ async function main() {
       case "/bg": {
         const task = rest.join(" ").trim();
         if (!task) {
-          ui.notify("Usage: /bg <task>, e.g. /bg find where currentLegIndex is changed", "error");
+          ui.notify(
+            "Usage: /bg <task>, e.g. /bg find where currentLegIndex is changed",
+            "error",
+          );
           return true;
         }
         const started = subagents.startBackground(task);
@@ -894,8 +1198,10 @@ async function main() {
                     : t.status === "cancelled"
                       ? chalk.dim("cancelled")
                       : chalk.red("failed");
-              const who = t.kind === "subagent" ? `subagent (${t.model})` : t.model;
-              const task = t.task.length > 70 ? t.task.slice(0, 69) + "…" : t.task;
+              const who =
+                t.kind === "subagent" ? `subagent (${t.model})` : t.model;
+              const task =
+                t.task.length > 70 ? t.task.slice(0, 69) + "…" : t.task;
               return `  #${t.id}  ${state}  ${chalk.dim(`${who} · ${t.steps} steps`)}  ${task}`;
             })
             .join("\n"),
@@ -904,9 +1210,17 @@ async function main() {
       }
       case "/result": {
         const t = subagents.get(Number(rest[0]));
-        if (!t) ui.notify(`No background task #${rest[0] ?? ""}. /tasks to list them.`, "error");
-        else if (t.status === "running") ui.notify(`#${t.id} is still running (${t.steps} steps so far).`);
-        else console.log(`  ${chalk.bold(`#${t.id}`)} ${chalk.dim(t.task)}\n\n${t.report}\n`);
+        if (!t)
+          ui.notify(
+            `No background task #${rest[0] ?? ""}. /tasks to list them.`,
+            "error",
+          );
+        else if (t.status === "running")
+          ui.notify(`#${t.id} is still running (${t.steps} steps so far).`);
+        else
+          console.log(
+            `  ${chalk.bold(`#${t.id}`)} ${chalk.dim(t.task)}\n\n${t.report}\n`,
+          );
         return true;
       }
       case "/resume":
@@ -933,7 +1247,10 @@ async function main() {
         agent.reset();
         conversationId = undefined;
         lastTask = undefined;
-        ui.notify("Started a fresh conversation. /resume to go back to earlier ones.", "ok");
+        ui.notify(
+          "Started a fresh conversation. /resume to go back to earlier ones.",
+          "ok",
+        );
         return true;
       case "/mac":
         if (!isMac) ui.notify("Only on macOS.");
@@ -988,16 +1305,27 @@ async function main() {
     banner([
       tagline,
       // Short enough for an 80-column terminal; /model has the details.
-      chalk.dim(`${greeting()}. ${path.basename(root)} · ${modelSummary().replace(/^Models?: /, "").replace(/ · better ones available, \/model$/, "")}`),
+      chalk.dim(
+        `${greeting()}. ${path.basename(root)} · ${modelSummary()
+          .replace(/^Models?: /, "")
+          .replace(/ · better ones available, \/model$/, "")}`,
+      ),
       mac
         ? (mac.warn ? chalk.yellow : chalk.dim)(
-            `Mac: ${mac.text.replace(" free", "").replace("memory ", "mem ").replace(/ free/, "").replace(/\/\d+ cores/, "")}`,
+            `Mac: ${mac.text
+              .replace(" free", "")
+              .replace("memory ", "mem ")
+              .replace(/ free/, "")
+              .replace(/\/\d+ cores/, "")}`,
           )
         : "",
     ]) + "\n",
   );
   if (!ollamaUp)
-    ui.notify(`Can't reach Ollama at ${config.host}. Start it with: brew services start ollama`, "error");
+    ui.notify(
+      `Can't reach Ollama at ${config.host}. Start it with: brew services start ollama`,
+      "error",
+    );
   function modelSummary() {
     return ollamaUp ? summarizeModels(router) : "Model: Ollama not running";
   }
@@ -1018,10 +1346,15 @@ async function main() {
       chalk.dim(`No project scan yet. Type /scan or say "scan the project".`),
     );
   }
-  const lastChat = process.env.ELENA_RESUME === undefined ? memory.listConversations(root, 1)[0] : undefined;
+  const lastChat =
+    process.env.ELENA_RESUME === undefined
+      ? memory.listConversations(root, 1)[0]
+      : undefined;
   if (lastChat)
     console.log(
-      chalk.dim(`Last conversation ${ago(lastChat.updated_at)}: "${lastChat.title}" (/resume last).`),
+      chalk.dim(
+        `Last conversation ${ago(lastChat.updated_at)}: "${lastChat.title}" (/resume last).`,
+      ),
     );
   const remembered = memory.list(root).length;
   if (remembered)
@@ -1031,49 +1364,118 @@ async function main() {
       ),
     );
   const processNames = () => processes.list().map((p) => p.name);
+  const expertArgs = (expert: ExpertName, w: string[]) => {
+    if (!w.length) return ["reply", "edit"];
+    if (w.length === 1 && w[0] === "edit") return ["reply"];
+    if (w[w.length - 1] === "reply")
+      return subagents
+        .list()
+        .filter((t) => t.kind === expert && t.sessionId)
+        .map((t) => `#${t.id}`);
+    return [];
+  };
   const taskIds = () => subagents.list().map((t) => String(t.id));
   commandSpecs = [
     { name: "/context", about: "what's filling the context window" },
     { name: "/compact", about: "free up context" },
     { name: "/scan", about: "scan the project in the background" },
-    { name: "/review", about: "review uncommitted changes", args: (w) => (w.length ? [] : ["claude", "codex"]) },
-    { name: "/resume", about: "pick up a past conversation", args: (w) => (w.length ? [] : ["last", ...memory.listConversations(root, 10).map((_, i) => String(i + 1))]) },
+    {
+      name: "/review",
+      about: "review uncommitted changes",
+      args: (w) => (w.length ? [] : ["claude", "codex"]),
+    },
+    {
+      name: "/resume",
+      about: "pick up a past conversation",
+      args: (w) =>
+        w.length
+          ? []
+          : [
+              "last",
+              ...memory
+                .listConversations(root, 10)
+                .map((_, i) => String(i + 1)),
+            ],
+    },
     {
       name: "/model",
       about: "which model each task uses",
       args: (w) => {
-        const models = router.list().filter((m) => m.tools).map((m) => m.name);
+        const models = router
+          .list()
+          .filter((m) => m.tools)
+          .map((m) => m.name);
         if (!w.length) return ["auto", ...TASKS, ...models];
-        return (TASKS as string[]).includes(w[0]) && w.length === 1 ? ["auto", ...models] : [];
+        return (TASKS as string[]).includes(w[0]) && w.length === 1
+          ? ["auto", ...models]
+          : [];
       },
     },
     { name: "/ps", about: "background processes" },
-    { name: "/logs", about: "a process's output", args: (w) => (w.length ? [] : processNames()) },
-    { name: "/stop", about: "stop a process", args: (w) => (w.length ? [] : processNames()) },
-    { name: "/claude", about: "hand a task to Claude Code", args: (w) => (w.length ? [] : ["edit"]) },
-    { name: "/codex", about: "hand a task to Codex", args: (w) => (w.length ? [] : ["edit"]) },
+    {
+      name: "/logs",
+      about: "a process's output",
+      args: (w) => (w.length ? [] : processNames()),
+    },
+    {
+      name: "/stop",
+      about: "stop a process",
+      args: (w) => (w.length ? [] : processNames()),
+    },
+    {
+      name: "/claude",
+      about: "hand a task to Claude Code, or reply to it",
+      args: (w) => expertArgs("claude", w),
+    },
+    {
+      name: "/codex",
+      about: "hand a task to Codex, or reply to it",
+      args: (w) => expertArgs("codex", w),
+    },
     { name: "/bg", about: "investigate in the background" },
     { name: "/tasks", about: "background tasks" },
-    { name: "/result", about: "a background task's report", args: (w) => (w.length ? [] : taskIds()) },
-    { name: "/cancel", about: "stop a background task", args: (w) => (w.length ? [] : taskIds()) },
+    {
+      name: "/result",
+      about: "a background task's report",
+      args: (w) => (w.length ? [] : taskIds()),
+    },
+    {
+      name: "/cancel",
+      about: "stop a background task",
+      args: (w) => (w.length ? [] : taskIds()),
+    },
     { name: "/project", about: "the saved project summary" },
     { name: "/new", about: "start a fresh conversation" },
     { name: "/reload", about: "restart with the latest code" },
     { name: "/memories", about: "what Elena remembers" },
-    { name: "/forget", about: "delete a memory", args: (w) => (w.length ? [] : memory.list(root).map((m) => String(m.id))) },
+    {
+      name: "/forget",
+      about: "delete a memory",
+      args: (w) => (w.length ? [] : memory.list(root).map((m) => String(m.id))),
+    },
     { name: "/mac", about: "Mac health" },
     { name: "/experts", about: "which cloud agents are ready" },
-    { name: "/pull", about: "download a model", args: (w) => (w.length ? [] : KNOWN_MODELS) },
+    {
+      name: "/pull",
+      about: "download a model",
+      args: (w) => (w.length ? [] : KNOWN_MODELS),
+    },
     { name: "/help", about: "all commands" },
   ];
-  new Autosuggest(rl, () => commandSpecs, () => ui.isWaitingForInput).attach();
+  new Autosuggest(
+    rl,
+    () => commandSpecs,
+    () => ui.isWaitingForInput,
+  ).attach();
   ui.statusSuffix = contextBar;
 
   // After /reload: pick the same conversation back up, and skip the cheat sheet (you've seen it).
   const resumeId = Number(process.env.ELENA_RESUME ?? "");
   const reloaded = process.env.ELENA_RESUME !== undefined;
   delete process.env.ELENA_RESUME;
-  const resumed = resumeId ? memory.listConversations(root, 200).find((c) => c.id === resumeId) : undefined;
+  const resumed = resumeId
+    ? memory.listConversations(root, 200).find((c) => c.id === resumeId)
+    : undefined;
   if (resumed) loadConversation(resumed, true);
   else if (reloaded) ui.notify("↺ Reloaded with the latest code.", "ok");
   else console.log("\n" + cheatSheet());
@@ -1083,21 +1485,34 @@ async function main() {
   let codeChangeNoticed = false;
   let codeChangeTimer: NodeJS.Timeout | undefined;
   try {
-    watch(path.dirname(fileURLToPath(import.meta.url)), { recursive: true }, (_event, file) => {
-      if (codeChangeNoticed || !String(file ?? "").endsWith(".js")) return;
-      clearTimeout(codeChangeTimer);
-      codeChangeTimer = setTimeout(() => {
-        codeChangeNoticed = true;
-        ui.notify("Elena's code was updated. /reload to use it; this conversation carries over.");
-      }, 1500);
-    }).unref();
+    watch(
+      path.dirname(fileURLToPath(import.meta.url)),
+      { recursive: true },
+      (_event, file) => {
+        if (codeChangeNoticed || !String(file ?? "").endsWith(".js")) return;
+        clearTimeout(codeChangeTimer);
+        codeChangeTimer = setTimeout(() => {
+          codeChangeNoticed = true;
+          ui.notify(
+            "Elena's code was updated. /reload to use it; this conversation carries over.",
+          );
+        }, 1500);
+      },
+    ).unref();
   } catch {
     // watching isn't available here; /reload still works
   }
   // Build Elena.app (once) so notifications show her icon. Quiet unless it actually builds.
   if (isMac && config.notify)
     ensureNotifier()
-      .then((s) => s === "built" && ui.notify("Built ~/.elena/Elena.app, so notifications now show Elena's icon.", "step"))
+      .then(
+        (s) =>
+          s === "built" &&
+          ui.notify(
+            "Built ~/.elena/Elena.app, so notifications now show Elena's icon.",
+            "step",
+          ),
+      )
       .catch(() => {});
   console.log(chalk.dim(`\ntype 'exit' to quit.\n`));
 
@@ -1116,19 +1531,47 @@ async function main() {
     // Hand Elena any background reports that finished since her last turn.
     const reports = subagents.takeUndelivered();
     if (reports.length)
-      ui.notify(`↪ Giving Elena the report${reports.length > 1 ? "s" : ""} from ${reports.map((t) => `#${t.id}`).join(", ")}.`, "step");
+      ui.notify(
+        `↪ Giving Elena the report${reports.length > 1 ? "s" : ""} from ${reports.map((t) => `#${t.id}`).join(", ")}.`,
+        "step",
+      );
     const withReports = reports.length
       ? reports
           .map((t) => {
             const report = t.report ?? "";
-            const body = report.length > 4000 ? report.slice(0, 4000) + `\n… (truncated; the user can see all of it with /result ${t.id})` : report;
-            const task = t.task.length > 200 ? t.task.slice(0, 200) + "…" : t.task;
+            const body =
+              report.length > 4000
+                ? report.slice(0, 4000) +
+                  `\n… (truncated; the user can see all of it with /result ${t.id})`
+                : report;
+            const task =
+              t.task.length > 200 ? t.task.slice(0, 200) + "…" : t.task;
             return `[Background task #${t.id} by ${t.model} (${task}) ${t.status === "done" ? "finished" : "failed"}. Report:]\n${body}`;
           })
-          .join("\n\n") +
-        `\n\n[My message:]\n${input}`
+          .join("\n\n") + `\n\n[My message:]\n${input}`
       : input;
-    await turn(withReports, classify(input, lastTask));
+    // Big jobs: remind the local model it can hand this to Claude (it rarely decides to on its own).
+    const claudeReady = (await escalation.available()).includes("claude");
+    const nudge = claudeReady && looksHeavy(input)
+      ? `\n\n[Note from Elena's app, not the user: this looks like a big job. If it needs changes across several files or you're not sure you can do it well, hand it to Claude with slash_command "/claude edit <task>" (the user approves first). Small, clear edits you can do yourself.]`
+      : "";
+    const claudeTasksBefore = subagents.list().filter((t) => t.kind === "claude").length;
+    const declinesBefore = escalation.declines;
+    turnDeclines = escalation.declines;
+    lastAnswer = "";
+    await turn(withReports + nudge, classify(input, lastTask));
+
+    // The local model often says "I'll hand this to Claude" and doesn't. For a big job that ended
+    // without a Claude task, offer the handoff directly (the usual approval prompt), with her notes.
+    const handedOff = subagents.list().filter((t) => t.kind === "claude").length > claudeTasksBefore;
+    const saidNo = escalation.declines > declinesBefore;
+    if (nudge && !handedOff && !saidNo) {
+      ui.notify("Elena can't change files herself, so this is a job for Claude Code.");
+      const notes = lastAnswer.trim() ? `\n\nElena's notes so far:\n${lastAnswer.trim().slice(0, 1500)}` : "";
+      const res = await escalation.ask(input + notes, { expert: "claude", mode: "edit", background: true, userInitiated: false });
+      if (res.task) ui.notify(`☁ Claude Code is on it as background task #${res.task.id} (may edit files). Keep chatting; I'll tell you when it's done.`);
+      else ui.notify(res.message.startsWith("User declined") ? "OK, not handed off." : res.message, res.message.startsWith("User declined") ? "info" : "error");
+    }
   }
   await shutdown(0);
 }

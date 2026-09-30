@@ -10,10 +10,12 @@ import {
   type ExpertName,
 } from "./experts.js";
 import type { BackgroundTask, SubagentManager } from "./subagents.js";
+import type { MemoryStore } from "./memory/store.js";
 
 export interface EscalationDeps {
   root: string;
   tasks: SubagentManager;
+  memory: MemoryStore;
   confirm(question: string): Promise<boolean>;
   /** A step from a running expert, e.g. "Read src/booking.js". */
   onStep(id: number, step: string): void;
@@ -25,11 +27,15 @@ export interface AskOptions {
   background: boolean;
   /** The user typed the command themselves, so read-only runs don't need another yes. */
   userInitiated: boolean;
+  /** Continue this earlier session; `task` is then the follow-up message. */
+  resume?: string;
 }
 
 /** Hands heavy tasks to Claude Code or Codex, after the user agrees to send the work off the Mac. */
 export class Escalation {
   private availability?: Record<ExpertName, Availability>;
+  /** How many handoffs the user has said no to; the CLI uses it so one "no" isn't followed by another ask. */
+  declines = 0;
 
   constructor(private deps: EscalationDeps) {}
 
@@ -74,22 +80,47 @@ export class Escalation {
             : `It can read and EDIT files in ${where}, and run commands in a sandbox limited to the project.`
           : `It can read files in ${where} but not change anything.`;
       const ok = await this.deps.confirm(
-        `Send this to ${EXPERT_LABELS[expert]} (uses your ${expert === "claude" ? "Claude" : "OpenAI"} account)?\n    ${task}\n  ${what}`,
+        `${opts.resume ? "Send this follow-up" : "Send this"} to ${EXPERT_LABELS[expert]} (uses your ${expert === "claude" ? "Claude" : "OpenAI"} account)?\n    ${task}\n  ${what}`,
       );
-      if (!ok) return { message: "User declined to send this to a cloud agent." };
+      if (!ok) {
+        this.declines++;
+        return {
+          message:
+            "User declined to send this to a cloud agent. Don't offer the handoff again for this request. " +
+            "If they wanted code changed, say in one line that you can't edit files yourself, and give the change as a short snippet they can apply.",
+        };
+      }
     }
 
-    const label = `${EXPERT_LABELS[expert]}${opts.mode === "edit" ? " (edit)" : ""}`;
+    const label = `${EXPERT_LABELS[expert]}${opts.resume ? " follow-up" : ""}${opts.mode === "edit" ? " (edit)" : ""}`;
+    // Record the session as soon as its id is known, so it can be continued even if this run fails or is cancelled.
+    const record = (sessionId: string) =>
+      this.deps.memory.saveExpertSession({ sessionId, root: this.deps.root, expert, mode: opts.mode, task: task.slice(0, 500) });
     if (!opts.background) {
-      const run = runExpert(expert, { task, mode: opts.mode, root: this.deps.root, onStep: (s) => this.deps.onStep(0, s) });
-      return { message: `${label} report:\n${await run.result}` };
-    }
-
-    const bg = this.deps.tasks.track(expert, task, label, (bg) => {
+      let sessionId: string | undefined;
       const run = runExpert(expert, {
         task,
         mode: opts.mode,
         root: this.deps.root,
+        resume: opts.resume,
+        onStep: (s) => this.deps.onStep(0, s),
+        onSession: (id) => record((sessionId = id)),
+      });
+      const report = await run.result;
+      return { message: `${label} report (session ${sessionId?.slice(0, 8) ?? "?"}; follow up with ask_expert follow_up):\n${report}` };
+    }
+
+    const bg = this.deps.tasks.track(expert, task, label, (bg) => {
+      bg.mode = opts.mode;
+      const run = runExpert(expert, {
+        task,
+        mode: opts.mode,
+        root: this.deps.root,
+        resume: opts.resume,
+        onSession: (id) => {
+          bg.sessionId = id;
+          record(id);
+        },
         onStep: (s) => {
           if (bg.status !== "running") return; // late output after a cancel
           bg.steps++;

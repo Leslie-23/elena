@@ -92,6 +92,7 @@ elena ~/Projects/Transport-For-Ghana
 | `scan_project` | Scan the project and refresh Elena's summary |
 | `delegate` | Hand an investigation to a read-only subagent, in the foreground or background |
 | `ask_expert` | Hand a heavy task to Claude Code or Codex (asks first) |
+| `slash_command` | Run one of your slash commands herself (a safe subset, same approvals) |
 | `mac_open` | Open an app ("vscode", "chrome"), a URL (`localhost:6969/docs`) or a project file/folder. External websites ask first. |
 | `mac_status` | Battery, disk, memory, CPU load, volume, uptime, front app |
 | `mac_control` | Volume, mute/unmute, screenshot to the Desktop, lock screen (asks first) |
@@ -115,6 +116,7 @@ elena ~/Projects/Transport-For-Ghana
 | `/stop <name>` | Stop a process |
 | `/claude <task>`, `/codex <task>` | Hand a heavy task to a cloud agent, read-only, in the background |
 | `/claude edit <task>`, `/codex edit <task>` | Same, but it may edit files (always asks first) |
+| `/claude reply <message>` | Follow up in the latest Claude session in this project (`reply #n` for task n's session; same for `/codex`) |
 | `/review claude`, `/review codex` | Review uncommitted changes with a cloud agent |
 | `/experts` | Which cloud agents are installed and signed in |
 | `/bg <task>` | Send a subagent to investigate in the background; keep chatting |
@@ -171,6 +173,7 @@ For work too big for a local model (large multi-file changes, hard debugging, de
 - **Read-only by default.** Claude gets only Read, Grep and Glob. Codex runs with `--sandbox read-only`.
 - **Edit mode:** Claude also gets Edit and Write, but never a shell. Codex uses `--sandbox workspace-write`: it may run commands, but can only write inside the project.
 - Runs in the background with live steps (`[#1] Claude Code › Read api/src/server.js`), a notification when done, and the report handed to Elena with your next message (up to 4,000 characters; `/result <n>` shows all of it).
+- **Follow-ups keep the conversation.** Each handoff is a saved Claude Code (or Codex) session. `/claude reply <message>` continues the latest one in this project, so Claude remembers what it already read and found; `/claude reply #3 …` continues task 3's session. Follow-ups keep their session's mode (read-only stays read-only) unless you add `edit`. Elena can follow up herself too (`ask_expert` with `follow_up`). `/experts` lists recent sessions, and `claude --resume <id>` opens one in Claude Code.
 - `/cancel <n>` stops a run, and quitting Elena stops them all, so nothing keeps running on your quota. Runs time out after 15 minutes.
 - MCP servers and claude.ai connectors are switched off for these runs (`--strict-mcp-config`). In testing that cut a small question from ~$0.46 to ~$0.01 API-equivalent. On a Claude plan this is usage against your plan, not a charge.
 
@@ -227,6 +230,19 @@ The remaining miss: asked what `calculateFare(0.5, 1)` returns, she computes 6.5
 - **Live view:** every reply ends with a meter, e.g. `(4.2s · qwen3:14b · context ▰▰▰▱▱▱▱▱▱▱ 31% of 16k)`, green, then yellow past 60% and red past 80%. The count is Ollama's own (the full prompt, cached or not), estimated from the measured tokens-per-character between replies. `/context` breaks it down: instructions, tool definitions (the 24 tools alone are about 2.6k tokens), your messages, Elena's replies and tool results.
 - **Compaction:** at 75% full (`ELENA_COMPACT_AT`), Elena first shortens tool output older than the last two turns (she already used it), then, only if that isn't enough and there's enough old conversation for it to pay off, replaces the older messages with a short summary that keeps decisions, facts, paths, ports, errors, open tasks and your preferences. A summary that wouldn't be meaningfully shorter is discarded, and an earlier summary's facts are carried into the next one. `/compact` does it on demand. This matters: if a prompt overflows, Ollama silently drops its start, which is Elena's instructions. The saved conversation in `~/.elena/elena.db` keeps everything.
 - **Updates without losing your place:** when Elena's code changes on disk (after `elena update` or a rebuild), she says so; `/reload` restarts her in place with the new code and carries the conversation over. Running servers and background tasks are stopped, after asking.
+
+## Elena hands off on her own
+
+Elena can't edit files herself, so for real implementation work she hands off to Claude Code without being told: she runs `/claude edit <task>` through her `slash_command` tool, and you approve it as usual. She also runs `/claude reply`, `/review claude`, `/bg`, `/scan`, `/compact` and `/tasks` when they fit. `/reload`, `/new`, `/resume` and `/forget` stay yours; a local `/review` isn't available to her mid-reply, and `/compact` waits until her reply is done.
+
+Because a 14B model often *says* it will hand off and doesn't, two things back it up:
+
+- Requests that look like implementation work ("implement…", "refactor…", "add support for…", "write tests for…", "set up…") get a note telling her to hand off when Claude is signed in.
+- If such a request ends without a Claude task, Elena offers the handoff herself, with the model's notes attached.
+
+One "no" is final for that request: she won't ask again, and says she can't edit files and gives a snippet instead.
+
+Qwen3 sometimes writes a tool call Ollama can't parse ("parameters" instead of "arguments", a wrong closing tag), and Ollama silently drops it, leaving an empty reply. Elena detects that, asks again without Ollama's parser, and reads the call herself; replies that start like a tool call are held back instead of streamed, so you never see raw JSON.
 
 ## Conversations
 

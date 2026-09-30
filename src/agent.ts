@@ -17,7 +17,7 @@ export interface AgentEvents {
 
 /** "Let me check package.json.", "I'll look at…" ending a reply that has no tool call. */
 export const ANNOUNCED_ACTION =
-  /\b(let me|let's|let us|i'll|i will|i'm going to|i am going to|i need to|we need to|we should|next,? (i|we))\b[^.!?\n]{0,80}\b(check|look|search|read|find|open|inspect|run|verify|examine|review)\b[^!?\n]{0,120}$/i;
+  /\b(let me|let's|let us|i'll|i will|i'm going to|i am going to|i need to|we need to|we should|next,? (i|we))\b[^.!?\n]{0,80}\b(check|look|search|read|find|open|inspect|run|verify|examine|review|implement|modify|change|add|write|edit|update|create|fix)\b[^!?\n]{0,120}$/i;
 
 const SUMMARY_PREFIX = "Summary of our conversation so far (older messages were compacted to save context):";
 
@@ -205,6 +205,7 @@ export class Agent {
     this.push({ role: "user", content: userInput });
     const schemas = this.tools.map((t) => t.schema);
     let nudged = false;
+    let retriedEmpty = false;
 
     for (let step = 0; step < config.maxSteps; step++) {
       let usage: { promptTokens: number; outputTokens: number } | undefined;
@@ -216,6 +217,17 @@ export class Agent {
         onUsage: (u) => (usage = u),
       });
       if (usage) this.recordUsage(usage.promptTokens, usage.outputTokens, this.messageChars(reply));
+
+      // The model wrote something, but it came back empty: Ollama drops a tool call it can't parse
+      // (bad JSON, stray quotes). Ask once more instead of showing the user a blank reply.
+      if (!reply.content.trim() && !reply.tool_calls?.length && !retriedEmpty) {
+        retriedEmpty = true;
+        this.push({
+          role: "user",
+          content: "Your last reply came through empty, probably a tool call with invalid arguments. Try again: call the tool with valid JSON arguments, or answer in plain text.",
+        });
+        continue;
+      }
       this.push(reply);
 
       if (!reply.tool_calls?.length) {
@@ -223,7 +235,12 @@ export class Agent {
         const tail = reply.content.slice(-300);
         if (!nudged && ANNOUNCED_ACTION.test(tail) && !OFFER.test(tail)) {
           nudged = true;
-          this.push({ role: "user", content: "Go ahead and do that now with your tools, then answer." });
+          this.push({
+            role: "user",
+            content:
+              "Go ahead and do that now with your tools, then answer. If it means creating or changing files, you can't do that " +
+              'yourself: hand it to Claude with slash_command "/claude edit <task>".',
+          });
           continue;
         }
         return reply.content;

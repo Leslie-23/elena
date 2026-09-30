@@ -5,7 +5,7 @@ import { listeningPortsTool, portOwnerTool } from "./system.js";
 import { calculateTool } from "./calculate.js";
 import { runCommandTool } from "./shell.js";
 import { forgetTool, recallTool, rememberTool } from "./memory.js";
-import { askExpertTool, delegateTool } from "./agents.js";
+import { askExpertTool, delegateTool, slashCommandTool } from "./agents.js";
 import { clipboardTool, macControlTool, macOpenTool, macStatusTool } from "./mac.js";
 import { listProcessesTool, processLogsTool, scanProjectTool, startProcessTool, stopProcessTool } from "./processes.js";
 
@@ -27,6 +27,7 @@ export const tools: Tool[] = [
   scanProjectTool,
   delegateTool,
   askExpertTool,
+  slashCommandTool,
   macOpenTool,
   macStatusTool,
   macControlTool,

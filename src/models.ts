@@ -139,6 +139,15 @@ export class ModelRouter {
   }
 }
 
+/** Requests that usually mean real implementation work: a hint for Elena to hand them to Claude. */
+const HEAVY_HINTS =
+  /\b(implement|build (a|an|the|me)|create (a|an|the) (new )?\w+|add (a|an|the|support for) |refactor|rewrite|migrate|redesign|restructure|architect|port (it|this|the \w+) to|set up|integrate|write (the |some |unit |integration )?tests? for|fix (the|this|all|every) .{0,40}(across|everywhere|in all)|upgrade .{0,30} to)\b/i;
+
+/** Does this look like a big job, better handed to Claude than done by the local model? */
+export function looksHeavy(input: string): boolean {
+  return input.length > 20 && HEAVY_HINTS.test(input) && !/^\s*(what|where|which|how (do|does|much|many)|why|is|are|can you explain)\b/i.test(input);
+}
+
 const CODE_HINTS =
   /```|`[^`]+`|\b[\w/.-]+\.(tsx?|jsx?|mjs|py|go|rs|java|kt|swift|rb|php|cs|c|cpp|h|sql|vue|svelte)\b|\b(explain|debug|fix|bug|refactor|implement|write|rewrite|function|class|method|component|hook|stack ?trace|exception|type ?error|compile|unit test|tests?\b|why (is|does|doesn't|isn't) (this|the|my) (code|function)|how does .+ work)\b/i;
 

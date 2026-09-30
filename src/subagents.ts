@@ -30,6 +30,9 @@ export interface BackgroundTask {
   delivered: boolean;
   /** Stops the task, if it can be stopped. */
   cancel?: () => void;
+  /** For Claude Code / Codex tasks: the session, so it can be followed up. */
+  sessionId?: string;
+  mode?: "read" | "edit";
 }
 
 export interface SubagentDeps {
@@ -118,6 +121,7 @@ export class SubagentManager implements SubagentRunner {
       ...this.deps.ctx,
       subagents: undefined, // no nesting
       escalation: undefined,
+      slash: undefined,
       scan: undefined,
       notify: undefined,
       confirm: async () => false, // anything that would need approval is declined

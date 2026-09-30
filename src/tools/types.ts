@@ -15,6 +15,8 @@ export interface ToolContext {
   notify?(message: string): void;
   /** Hand a task to a subagent. Absent inside subagents, so they can't spawn more. */
   subagents?: SubagentRunner;
+  /** Run one of the user's slash commands (a safe subset). Absent inside subagents and MCP. */
+  slash?(line: string): Promise<string>;
   /** Hand a heavy task to Claude Code or Codex. Absent inside subagents. */
   escalation?: import("../escalate.js").Escalation;
 }

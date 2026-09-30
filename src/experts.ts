@@ -1,4 +1,5 @@
 import { spawn, type ChildProcess } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -65,6 +66,10 @@ export interface ExpertRunOptions {
   root: string;
   /** Called for each thing the expert does (a file read, a search, an edit, a command). */
   onStep(step: string): void;
+  /** Continue this earlier session instead of starting a new one. `task` is then the follow-up message. */
+  resume?: string;
+  /** Called with the session id as soon as it's known, so the session can be followed up later. */
+  onSession?(id: string): void;
 }
 
 function briefing(task: string, mode: ExpertMode, root: string): string {
@@ -73,6 +78,13 @@ ${mode === "read" ? "Read-only: do not modify any files." : "You may edit files 
 When you're done, reply with a concise report for Elena: the answer or what you changed first, then the key evidence as path:line.
 
 Task: ${task}`;
+}
+
+/** A follow-up in an existing session: the briefing is already in its history, so just restate the mode. */
+function followUp(message: string, mode: ExpertMode): string {
+  return `Follow-up from the user, via Elena (${mode === "read" ? "still read-only: don't modify files" : "you may edit files in this project"}):
+
+${message}`;
 }
 
 const short = (v: unknown) => {
@@ -133,17 +145,21 @@ export function killExpert(child: ChildProcess) {
   }
 }
 
-export function runClaude({ task, mode, root, onStep }: ExpertRunOptions): ExpertRun {
+export function runClaude({ task, mode, root, onStep, resume, onSession }: ExpertRunOptions): ExpertRun {
   // Read mode gets search/read tools only; edit mode adds Edit and Write. Neither gets Bash, so nothing is executed.
+  // Tools and permissions aren't stored with a session, so they're passed again on every follow-up.
   const tools = mode === "read" ? "Read,Grep,Glob" : "Read,Grep,Glob,Edit,Write";
+  // New sessions get an id we choose, so we know it before Claude starts; follow-ups resume it.
+  const sessionId = resume ?? randomUUID();
+  onSession?.(sessionId);
   const child = spawnExpert(
     "claude",
     [
-      "-p", briefing(task, mode, root),
+      "-p", resume ? followUp(task, mode) : briefing(task, mode, root),
+      ...(resume ? ["--resume", resume] : ["--session-id", sessionId]),
       "--output-format", "stream-json", "--verbose",
       "--tools", tools,
       "--permission-mode", mode === "read" ? "dontAsk" : "acceptEdits",
-      "--no-session-persistence",
       // Skip MCP servers and claude.ai connectors: they add a lot of context (cost) and aren't needed here.
       "--strict-mcp-config",
     ],
@@ -166,6 +182,7 @@ export function runClaude({ task, mode, root, onStep }: ExpertRunOptions): Exper
       }
     }
     if (e.type === "result") {
+      if (typeof e.session_id === "string" && e.session_id !== sessionId) onSession?.(e.session_id);
       final = typeof e.result === "string" ? e.result : lastText;
       if (e.is_error) final = `Claude reported an error: ${final}`;
       // On a Claude plan this is the API-equivalent cost, not a charge.
@@ -180,25 +197,29 @@ export function runClaude({ task, mode, root, onStep }: ExpertRunOptions): Exper
   return { child, result };
 }
 
-export function runCodex({ task, mode, root, onStep }: ExpertRunOptions): ExpertRun {
+export function runCodex({ task, mode, root, onStep, resume, onSession }: ExpertRunOptions): ExpertRun {
   const outDir = mkdtempSync(path.join(os.tmpdir(), "elena-codex-"));
   const outFile = path.join(outDir, "last-message.txt");
+  // Sessions are kept (no --ephemeral) so they can be followed up with `codex exec resume <id>`.
   const child = spawnExpert(
     "codex",
     [
       "exec", "--json",
       "--sandbox", mode === "read" ? "read-only" : "workspace-write",
-      "--cd", root, "--skip-git-repo-check", "--ephemeral",
+      "--cd", root, "--skip-git-repo-check",
       "--output-last-message", outFile,
+      ...(resume ? ["resume", resume] : []),
       "-", // prompt on stdin
     ],
     root,
-    briefing(task, mode, root),
+    resume ? followUp(task, mode) : briefing(task, mode, root),
   );
+  if (resume) onSession?.(resume);
 
   let lastText = "";
   const result = watch(child, (line) => {
     const e = json(line);
+    if (e?.type === "thread.started" && typeof e.thread_id === "string") onSession?.(e.thread_id);
     const item = e?.item;
     if (!item || !String(e?.type).startsWith("item.")) return;
     if (e!.type === "item.started" && item.type === "command_execution") onStep(`$ ${short(item.command)}`);

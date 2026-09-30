@@ -34,6 +34,18 @@ export interface ConversationSummary {
   turns: number;
 }
 
+export interface ExpertSession {
+  session_id: string;
+  root: string;
+  expert: string;
+  mode: "read" | "edit";
+  /** The task that started the session. */
+  task: string;
+  turns: number;
+  created_at: string;
+  updated_at: string;
+}
+
 export const GLOBAL = "global";
 
 export class MemoryStore {
@@ -70,6 +82,16 @@ export class MemoryStore {
         tool_name       TEXT
       );
       CREATE INDEX IF NOT EXISTS messages_conversation ON messages(conversation_id, id);
+      CREATE TABLE IF NOT EXISTS expert_sessions (
+        session_id TEXT PRIMARY KEY,
+        root       TEXT NOT NULL,
+        expert     TEXT NOT NULL,
+        mode       TEXT NOT NULL,
+        task       TEXT NOT NULL,
+        turns      INTEGER NOT NULL DEFAULT 1,
+        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+        updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+      );
       CREATE TABLE IF NOT EXISTS settings (
         key   TEXT PRIMARY KEY,
         value TEXT NOT NULL
@@ -117,6 +139,23 @@ export class MemoryStore {
       ...(r.tool_calls ? { tool_calls: JSON.parse(r.tool_calls) } : {}),
       ...(r.tool_name ? { tool_name: r.tool_name } : {}),
     }));
+  }
+
+  /** Record a Claude Code / Codex session (or a follow-up in it), so it can be continued later. */
+  saveExpertSession(s: { sessionId: string; root: string; expert: string; mode: string; task: string }) {
+    this.db
+      .prepare(
+        `INSERT INTO expert_sessions (session_id, root, expert, mode, task) VALUES (?, ?, ?, ?, ?)
+         ON CONFLICT(session_id) DO UPDATE SET turns = turns + 1, mode = excluded.mode, updated_at = datetime('now')`,
+      )
+      .run(s.sessionId, s.root, s.expert, s.mode, s.task);
+  }
+
+  /** Most recently used sessions in a project, optionally for one expert. */
+  listExpertSessions(root: string, expert?: string, limit = 5): ExpertSession[] {
+    const sql = `SELECT * FROM expert_sessions WHERE root = ?${expert ? " AND expert = ?" : ""} ORDER BY updated_at DESC, rowid DESC LIMIT ?`;
+    const params = expert ? [root, expert, limit] : [root, limit];
+    return this.db.prepare(sql).all(...params) as unknown as ExpertSession[];
   }
 
   getSetting(key: string): string | null {
